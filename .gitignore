@@ -1,0 +1,7 @@
+.next
+node_modules
+.data/*.sqlite
+.data/*.sqlite-*
+npm-debug.log*
+playwright-report
+test-results
