@@ -7,9 +7,15 @@ type AuditFormProps = {
   defaultLocale: string;
   defaultCountry: string;
   defaultMaxPages: number;
+  mode?: "domain" | "page";
 };
 
-export function AuditForm({ defaultLocale, defaultCountry, defaultMaxPages }: AuditFormProps) {
+export function AuditForm({
+  defaultLocale,
+  defaultCountry,
+  defaultMaxPages,
+  mode = "domain",
+}: AuditFormProps) {
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
   const [targetUrl, setTargetUrl] = useState("");
@@ -42,11 +48,12 @@ export function AuditForm({ defaultLocale, defaultCountry, defaultMaxPages }: Au
           "content-type": "application/json",
         },
         body: JSON.stringify({
+          mode,
           targetUrl,
           locale,
           country,
           maxPages,
-          competitorUrls: competitorUrls.filter(Boolean),
+          competitorUrls: mode === "domain" ? competitorUrls.filter(Boolean) : [],
         }),
       });
 
@@ -65,16 +72,16 @@ export function AuditForm({ defaultLocale, defaultCountry, defaultMaxPages }: Au
   return (
     <form className="audit-form" onSubmit={onSubmit}>
       <label>
-        <span>Måldomene</span>
+        <span>{mode === "domain" ? "Måldomene" : "Side-URL"}</span>
         <input
-          placeholder="https://example.no"
+          placeholder={mode === "domain" ? "https://example.no" : "https://example.no/landingsside"}
           value={targetUrl}
           onChange={(event) => setTargetUrl(event.target.value)}
           required
         />
       </label>
 
-      <div className="grid-3">
+      <div className={mode === "domain" ? "grid-3" : "grid-2"}>
         <label>
           <span>Locale</span>
           <input value={locale} onChange={(event) => setLocale(event.target.value)} required />
@@ -83,53 +90,57 @@ export function AuditForm({ defaultLocale, defaultCountry, defaultMaxPages }: Au
           <span>Land</span>
           <input value={country} maxLength={2} onChange={(event) => setCountry(event.target.value.toUpperCase())} required />
         </label>
-        <label>
-          <span>Maks sider</span>
-          <input
-            type="number"
-            min="10"
-            max="150"
-            value={maxPages}
-            onChange={(event) => setMaxPages(event.target.value)}
-            required
-          />
-        </label>
+        {mode === "domain" ? (
+          <label>
+            <span>Maks sider</span>
+            <input
+              type="number"
+              min="10"
+              max="500"
+              value={maxPages}
+              onChange={(event) => setMaxPages(event.target.value)}
+              required
+            />
+          </label>
+        ) : null}
       </div>
 
-      <div className="grid-2">
-        {competitorUrls.map((competitorUrl, index) => (
-          <label key={`competitor-${index}`}>
-            <span>Konkurrent {index + 1}</span>
-            <div className="button-row">
-              <input
-                placeholder="https://konkurrent.no"
-                value={competitorUrl}
-                onChange={(event) => updateCompetitor(index, event.target.value)}
-              />
-              {competitorUrls.length > 1 ? (
-                <button
-                  type="button"
-                  className="secondary-button"
-                  onClick={() => removeCompetitor(index)}
-                >
-                  Fjern
-                </button>
-              ) : null}
-            </div>
-          </label>
-        ))}
-      </div>
+      {mode === "domain" ? (
+        <div className="grid-2">
+          {competitorUrls.map((competitorUrl, index) => (
+            <label key={`competitor-${index}`}>
+              <span>Konkurrent {index + 1}</span>
+              <div className="button-row">
+                <input
+                  placeholder="https://konkurrent.no"
+                  value={competitorUrl}
+                  onChange={(event) => updateCompetitor(index, event.target.value)}
+                />
+                {competitorUrls.length > 1 ? (
+                  <button type="button" className="secondary-button" onClick={() => removeCompetitor(index)}>
+                    Fjern
+                  </button>
+                ) : null}
+              </div>
+            </label>
+          ))}
+        </div>
+      ) : null}
 
       <div className="button-row">
-        <button type="button" className="secondary-button" onClick={addCompetitor}>
-          Legg til konkurrent
-        </button>
+        {mode === "domain" ? (
+          <button type="button" className="secondary-button" onClick={addCompetitor}>
+            Legg til konkurrent
+          </button>
+        ) : null}
         <button type="submit" className="primary-button" disabled={isPending}>
-          {isPending ? "Starter analyse..." : "Start audit"}
+          {isPending ? "Starter analyse..." : mode === "domain" ? "Start domeneanalyse" : "Start sideanalyse"}
         </button>
       </div>
       <p className="helper-text">
-        Verktøyet crawler offentlige sider, sammenligner rå HTML mot rendret innhold og gir anbefalinger for AI-boter og SEO.
+        {mode === "domain"
+          ? "Verktøyet crawler offentlige sider, sammenligner rå HTML mot rendret innhold og gir anbefalinger for AI-boter og SEO. Standard er 150 sider, men du kan øke til 500 ved behov."
+          : "Verktøyet analyserer kun den eksakte URL-en du legger inn, og foreslår bedre struktur, innhold, metadata og JSON-LD for akkurat denne siden."}
       </p>
       {error ? <p className="error-text">{error}</p> : null}
     </form>

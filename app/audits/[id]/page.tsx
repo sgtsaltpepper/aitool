@@ -5,8 +5,8 @@ import { AutoRefresh } from "@/components/AutoRefresh";
 import { ScorePill, StatusPill } from "@/components/Badges";
 import { CATEGORY_LABELS, PROVIDER_LABELS } from "@/lib/config";
 import { getAuditReport, getAuditRun, listAuditRuns } from "@/lib/db";
-import type { Issue, Recommendation } from "@/lib/types";
-import { humanPath, summarizeList } from "@/lib/utils";
+import type { AuditReport, Issue, Recommendation } from "@/lib/types";
+import { humanPath, readableExcerpt, summarizeList } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 
@@ -23,7 +23,9 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
   }
 
   const report = run.status === "completed" ? getAuditReport(id) : null;
-  const history = listAuditRuns(20).filter((entry) => entry.targetUrl === run.targetUrl);
+  const history = listAuditRuns(20).filter(
+    (entry) => entry.targetUrl === run.targetUrl && entry.request.mode === run.request.mode,
+  );
 
   return (
     <>
@@ -31,32 +33,325 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
 
       <div className="report-header">
         <div>
-          <p className="muted">Analyse av {run.targetUrl}</p>
+          <p className="muted">
+            {run.request.mode === "page" ? "Sideanalyse av" : "Analyse av"} {run.targetUrl}
+          </p>
           <h1>Rapport</h1>
           <p>
-            Status, prioriterte funn og anbefalinger for AI-boter, klassisk søk og strukturell
-            forståelse av nettstedet.
+            {run.request.mode === "page"
+              ? "Før/etter-anbefalinger for akkurat denne siden, med forslag til innhold, struktur, metadata og JSON-LD."
+              : "Status, prioriterte funn og anbefalinger for AI-boter, klassisk søk og strukturell forståelse av nettstedet."}
           </p>
         </div>
         <div className="button-row">
           {run.summary ? <ScorePill score={run.summary.totalScore} /> : null}
           <StatusPill status={run.status} />
+          {report ? (
+            <a href={`/api/audits/${run.id}/suggestions`} className="secondary-button" download>
+              Eksporter forslag (.md)
+            </a>
+          ) : null}
           <Link href="/" className="secondary-button">
-            Ny analyse
+            {run.request.mode === "page" ? "Ny domeneanalyse" : "Ny analyse"}
           </Link>
+          {run.request.mode === "page" ? (
+            <Link href="/page-audit" className="secondary-button">
+              Ny sideanalyse
+            </Link>
+          ) : null}
         </div>
       </div>
 
       {run.status !== "completed" || !report ? (
         <section className="empty-state">
           <h3>{run.status === "failed" ? "Analysen feilet" : "Analysen kjører"}</h3>
-          <p>
-            {run.status === "failed"
-              ? run.errorMessage ?? "Noe gikk galt under kjøringen."
-              : "Siden oppdateres automatisk mens crawleren og analysemodulen jobber."}
-          </p>
+          <p>{run.status === "failed" ? run.errorMessage ?? "Noe gikk galt under kjøringen." : run.progress.message}</p>
+          {run.status !== "failed" ? (
+            <div className="progress-panel">
+              <div className="progress-meta">
+                <strong>{run.progress.percent}%</strong>
+                <span>{phaseLabel(run.progress.phase)}</span>
+              </div>
+              <div className="progress-track" aria-hidden="true">
+                <div className="progress-fill" style={{ width: `${run.progress.percent}%` }} />
+              </div>
+              <div className="progress-stats">
+                <span>
+                  Sider crawlet: {run.progress.pagesCrawled} / {run.progress.pagesTarget}
+                </span>
+                <span>Oppdaget: {run.progress.pagesDiscovered}</span>
+                {run.progress.competitorsTotal > 0 ? (
+                  <span>
+                    Konkurrenter: {run.progress.competitorsCompleted} / {run.progress.competitorsTotal}
+                  </span>
+                ) : null}
+                <span>
+                  Estimat igjen:{" "}
+                  {run.progress.estimatedSecondsRemaining !== null
+                    ? formatEta(run.progress.estimatedSecondsRemaining)
+                    : "beregnes..."}
+                </span>
+              </div>
+            </div>
+          ) : null}
         </section>
       ) : (
+        run.request.mode === "page" && report?.pageReport ? (
+        <>
+          <section className="report-grid">
+            <div className="section-header">
+              <h2>Nå-situasjonen</h2>
+              <p>{report.summary}</p>
+            </div>
+            <div className="overview-grid">
+              <div className="card">
+                <div className="score-lg">
+                  <span className="muted">Samlet vurdering</span>
+                  <strong>{report.totalScore}</strong>
+                  <span className="muted">
+                    {report.comparison.totalScoreDelta !== null
+                      ? `${report.comparison.totalScoreDelta >= 0 ? "+" : ""}${report.comparison.totalScoreDelta} siden sist`
+                      : "Første sideanalyse for denne URL-en"}
+                  </span>
+                </div>
+              </div>
+              <div className="card">
+                <h3>Dagens side</h3>
+                <ul className="list">
+                  <li>
+                    <strong>H1</strong>
+                    <p>{report.pageReport.current.h1 || "Ingen tydelig H1 funnet"}</p>
+                  </li>
+                  <li>
+                    <strong>Åpning</strong>
+                    <p>{report.pageReport.current.opening || "Ingen tydelig ingress eller lesbar åpning funnet."}</p>
+                  </li>
+                  <li>
+                    <strong>Metadata</strong>
+                    <p>
+                      {report.pageReport.current.metaTitle || "Ingen tittel"}.{" "}
+                      {report.pageReport.current.metaDescription || "Ingen metabeskrivelse."}
+                    </p>
+                  </li>
+                </ul>
+              </div>
+              <div className="card">
+                <h3>Det viktigste å ta tak i</h3>
+                <ul className="list">
+                  {report.pageReport.changeSummary.map((item) => (
+                    <li key={item}>
+                      <p>{item}</p>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          </section>
+
+          <section className="report-grid">
+            <div className="section-header">
+              <h2>Anbefalt ny sidestruktur</h2>
+              <p>Slik kan siden bygges opp for å svare raskere, bli mer overbevisende og lettere å bruke i søk og AI-svar.</p>
+            </div>
+            <div className="recommendations-grid">
+              <article className="recommendation">
+                <h3>Foreslått oppsett</h3>
+                <ul className="list">
+                  {report.pageReport.proposed.structure.map((item, index) => (
+                    <li key={item}>
+                      <strong>Steg {index + 1}</strong>
+                      <p>{item}</p>
+                    </li>
+                  ))}
+                </ul>
+              </article>
+              <article className="recommendation">
+                <h3>Anbefalte seksjoner</h3>
+                <ul className="list">
+                  {report.pageReport.proposed.sections.map((section) => (
+                    <li key={section.title}>
+                      <strong>{section.title}</strong>
+                      <p>{section.purpose}</p>
+                      <p>{section.suggestedContent}</p>
+                    </li>
+                  ))}
+                </ul>
+              </article>
+            </div>
+          </section>
+
+          <section className="report-grid">
+            <div className="section-header">
+              <h2>Bedre innhold for denne siden</h2>
+              <p>Konkrete forslag til overskrift, åpning, FAQ og neste steg.</p>
+            </div>
+            <div className="recommendations-grid">
+              <article className="recommendation">
+                <ul className="list">
+                  <li>
+                    <strong>Foreslått H1</strong>
+                    <p>{report.pageReport.proposed.h1}</p>
+                  </li>
+                  <li>
+                    <strong>Foreslått åpning</strong>
+                    <p>{report.pageReport.proposed.opening}</p>
+                  </li>
+                  <li>
+                    <strong>Foreslått CTA</strong>
+                    <p>{report.pageReport.proposed.cta}</p>
+                  </li>
+                </ul>
+              </article>
+              <article className="recommendation">
+                <h3>FAQ-forslag</h3>
+                <ul className="list">
+                  {report.pageReport.proposed.faq.map((faq) => (
+                    <li key={faq.question}>
+                      <strong>{faq.question}</strong>
+                      <p>{faq.answer}</p>
+                    </li>
+                  ))}
+                </ul>
+              </article>
+            </div>
+          </section>
+
+          <section className="report-grid">
+            <div className="section-header">
+              <h2>Bedre metadata</h2>
+              <p>Før/etter for metatittel og metabeskrivelse.</p>
+            </div>
+            <div className="recommendations-grid">
+              <article className="recommendation">
+                <ul className="list">
+                  <li>
+                    <strong>Nåværende metatittel</strong>
+                    <p>{report.pageReport.current.metaTitle || "Ingen metatittel funnet."}</p>
+                  </li>
+                  <li>
+                    <strong>Foreslått metatittel</strong>
+                    <p>{report.pageReport.proposed.metaTitle}</p>
+                  </li>
+                </ul>
+              </article>
+              <article className="recommendation">
+                <ul className="list">
+                  <li>
+                    <strong>Nåværende metabeskrivelse</strong>
+                    <p>{report.pageReport.current.metaDescription || "Ingen metabeskrivelse funnet."}</p>
+                  </li>
+                  <li>
+                    <strong>Foreslått metabeskrivelse</strong>
+                    <p>{report.pageReport.proposed.metaDescription}</p>
+                  </li>
+                </ul>
+              </article>
+            </div>
+          </section>
+
+          <section className="report-grid">
+            <div className="section-header">
+              <h2>Foreslått JSON-LD</h2>
+              <p>Schema-utkastet er tilpasset akkurat denne siden og bør speile synlig innhold.</p>
+            </div>
+            <article className="recommendation">
+              <ul className="list">
+                <li>
+                  <strong>Schema-type</strong>
+                  <p>{report.pageReport.proposed.schemaType}</p>
+                </li>
+                <li>
+                  <strong>Nåværende schema</strong>
+                  <p>
+                    {report.pageReport.current.schemaTypes.length
+                      ? report.pageReport.current.schemaTypes.join(", ")
+                      : "Ingen schema funnet."}
+                  </p>
+                </li>
+              </ul>
+              <pre>{report.pageReport.proposed.jsonLd}</pre>
+            </article>
+          </section>
+
+          <section className="report-grid">
+            <div className="section-header">
+              <h2>Hva du bør endre først</h2>
+              <p>Disse punktene gir mest effekt tidlig.</p>
+            </div>
+            <div className="issues-grid">
+              {report.pageReport.priorityActions.map((action) => (
+                <article className="issue-card" key={action}>
+                  <p>{action}</p>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section className="report-grid">
+            <div className="section-header">
+              <h2>Providerprofiler</h2>
+              <p>Her ser du hvordan ulike plattformer sannsynligvis vil oppfatte og bruke akkurat denne siden.</p>
+            </div>
+            <div className="provider-grid">
+              {report.providerScores.map((provider) => (
+                <article className="provider-card" key={provider.provider}>
+                  <div className="button-row">
+                    <h3>{provider.label}</h3>
+                    <ScorePill score={provider.score} />
+                  </div>
+                  <p>{provider.summary}</p>
+                  <ul className="list">
+                    <li>
+                      <strong>Hva dette betyr</strong>
+                      <p>{providerExplanation(provider.score)}</p>
+                    </li>
+                  </ul>
+                </article>
+              ))}
+            </div>
+          </section>
+
+          <section className="history-panel">
+            <div className="section-header">
+              <h2>Historikk</h2>
+              <p>Tidligere sideanalyser for samme URL.</p>
+            </div>
+            {history.length ? (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Dato</th>
+                      <th>Status</th>
+                      <th>Type</th>
+                      <th>Score</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {history.map((entry) => (
+                      <tr key={entry.id}>
+                        <td>
+                          <Link href={`/audits/${entry.id}`}>{new Date(entry.createdAt).toLocaleString("nb-NO")}</Link>
+                        </td>
+                        <td>
+                          <StatusPill status={entry.status} />
+                        </td>
+                        <td>{entry.request.mode === "page" ? "Sideanalyse" : "Domeneanalyse"}</td>
+                        <td>{entry.summary ? <ScorePill score={entry.summary.totalScore} /> : "Venter"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : (
+              <div className="empty-state">
+                <h3>Ingen historikk å vise</h3>
+                <p>Denne kjøringen er første registrerte sideanalyse for URL-en.</p>
+              </div>
+            )}
+          </section>
+        </>
+        ) : (
         <>
           <section className="report-grid">
             <div className="section-header">
@@ -66,12 +361,12 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
             <div className="overview-grid">
               <div className="card">
                 <div className="score-lg">
-                  <span className="muted">Totalscore</span>
+                  <span className="muted">Samlet vurdering</span>
                   <strong>{report.totalScore}</strong>
                   {report.comparison.totalScoreDelta !== null ? (
                     <span className={report.comparison.totalScoreDelta >= 0 ? "delta-positive" : "delta-negative"}>
                       {report.comparison.totalScoreDelta >= 0 ? "+" : ""}
-                      {report.comparison.totalScoreDelta} siden forrige kjøring
+                      {report.comparison.totalScoreDelta} siden sist
                     </span>
                   ) : (
                     <span className="muted">Første kjøring for dette domenet</span>
@@ -79,7 +374,7 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
                 </div>
               </div>
               <div className="card">
-                <h3>Core categories</h3>
+                <h3>Hva rapporten bygger på</h3>
                 <ul className="list">
                   {report.categoryScores.map((category) => (
                     <li key={category.id}>
@@ -108,7 +403,7 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
           <section className="report-grid">
             <div className="section-header">
               <h2>Providerprofiler</h2>
-              <p>Samme datasett, men ulike vurderinger for hvordan plattformene tolker og bruker innholdet ditt.</p>
+              <p>Her ser du hvordan ulike plattformer sannsynligvis vil oppfatte og bruke innholdet ditt.</p>
             </div>
             <div className="provider-grid">
               {report.providerScores.map((provider) => (
@@ -118,6 +413,12 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
                     <ScorePill score={provider.score} />
                   </div>
                   <p>{provider.summary}</p>
+                  <ul className="list">
+                    <li>
+                      <strong>Hva dette betyr</strong>
+                      <p>{providerExplanation(provider.score)}</p>
+                    </li>
+                  </ul>
                   {provider.blockers.length ? (
                     <>
                       <div className="tag-row">
@@ -131,7 +432,10 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
                   ) : null}
                   <ul className="list">
                     {provider.opportunities.map((opportunity) => (
-                      <li key={opportunity}>{opportunity}</li>
+                      <li key={opportunity}>
+                        <strong>Neste steg</strong>
+                        <p>{opportunity}</p>
+                      </li>
                     ))}
                   </ul>
                 </article>
@@ -142,7 +446,7 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
           <section className="report-grid">
             <div className="section-header">
               <h2>Anbefalinger</h2>
-              <p>Klare grep for innhold, struktur og publiseringsmaler.</p>
+              <p>Dette er de mest nyttige tiltakene for å forbedre innhold, struktur og synlighet.</p>
             </div>
             <div className="recommendations-grid">
               {report.recommendations.map((recommendation) => (
@@ -153,8 +457,8 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
 
           <section className="report-grid">
             <div className="section-header">
-              <h2>Issues</h2>
-              <p>Funnene nedenfor er de viktigste årsakene til at score og providerprofiler er der de er i dag.</p>
+              <h2>Det som holder siden tilbake</h2>
+              <p>Dette er de viktigste grunnene til at siden ikke scorer høyere akkurat nå.</p>
             </div>
             <div className="issues-grid">
               {report.issues.map((issue) => (
@@ -166,22 +470,37 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
           <section className="report-grid">
             <div className="section-header">
               <h2>Sider</h2>
-              <p>Eksempler på hvordan enkeltsider påvirker answer-first, rendering, freshness og tillitssignaler.</p>
+              <p>Konkrete sideeksempler som viser hva som fungerer bra, og hva som bør forbedres.</p>
             </div>
             <div className="pages-grid">
               {report.pages.slice(0, 12).map((page) => (
                 <article className="page-card" key={page.url}>
                   <div className="button-row">
                     <h3>{page.h1 || page.title || humanPath(page.url)}</h3>
-                    <span className="tag">{page.rendering.renderingModel.toUpperCase()}</span>
+                    <span className="tag">{renderingLabel(page.rendering.renderingModel)}</span>
                   </div>
-                  <p>{page.firstParagraph || "Ingen tydelig ingress funnet."}</p>
+                  <p>{readableExcerpt(page.firstParagraph || page.bodyText) || "Ingen tydelig ingress eller lesbar introduksjon funnet."}</p>
+                  <ul className="list">
+                    <li>
+                      <strong>Hva dette betyr</strong>
+                      <p>{explainPage(page)}</p>
+                    </li>
+                    <li>
+                      <strong>Signalene vi fant</strong>
+                      <p>
+                        {answerScoreLabel(page.answerFirstSignals.directAnswerLikelihood)}. {page.wordCount} ord.{" "}
+                        {page.schema.types.length
+                          ? `Schema: ${page.schema.types.join(", ")}.`
+                          : "Ingen schema funnet."}
+                      </p>
+                    </li>
+                  </ul>
                   <div className="tag-row">
-                    <span className="tag">Svarscore {page.answerFirstSignals.directAnswerLikelihood}</span>
-                    <span className="tag">Words {page.wordCount}</span>
-                    <span className="tag">Schema {page.schema.types.join(", ") || "Ingen"}</span>
-                    {page.noindex ? <span className="tag">noindex</span> : null}
-                    {page.blockedByRobots ? <span className="tag">robots-blokkert</span> : null}
+                    <span className="tag">Svarscore {page.answerFirstSignals.directAnswerLikelihood}/100</span>
+                    <span className="tag">{wordLabel(page.wordCount)}</span>
+                    <span className="tag">{page.schema.types.length ? `Schema ${page.schema.types.join(", ")}` : "Schema mangler"}</span>
+                    {page.noindex ? <span className="tag">Noindex</span> : null}
+                    {page.blockedByRobots ? <span className="tag">Blokkert i robots</span> : null}
                   </div>
                 </article>
               ))}
@@ -190,19 +509,34 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
 
           <section className="report-grid">
             <div className="section-header">
-              <h2>Topic clusters</h2>
-              <p>Rule-basert clustering fra titler, H1/H2, introtekst og ankertekst.</p>
+              <h2>Forslag til forbedret side</h2>
+              <p>
+                Her foreslår verktøyet en bedre struktur, skarpere metadata og et mer passende schema
+                for sider som har mest å hente.
+              </p>
+            </div>
+            <div className="recommendations-grid">
+              {report.pageSuggestions.map((suggestion) => (
+                <PageSuggestionCard key={suggestion.url} suggestion={suggestion} />
+              ))}
+            </div>
+          </section>
+
+          <section className="report-grid">
+            <div className="section-header">
+              <h2>Temagrupper</h2>
+              <p>Her grupperer vi sidene etter tema og ser om innholdet dekker ulike brukerbehov godt nok.</p>
             </div>
             <div className="cluster-grid">
               {report.topicClusters.map((cluster) => (
                 <article className="cluster-card" key={cluster.id}>
                   <div className="button-row">
                     <h3>{cluster.name}</h3>
-                    <span className="tag">{cluster.intent}</span>
+                    <span className="tag">{intentLabel(cluster.intent)}</span>
                     <ScorePill score={cluster.score} />
                   </div>
                   <p>
-                    {cluster.pages.length} sider i klyngen. Gjennomsnittlig likhet {cluster.averageSimilarity}.
+                    {cluster.pages.length} sider i denne temagruppen. Innholdslikhet {cluster.averageSimilarity}/100.
                   </p>
                   {cluster.missingCoverage.length ? (
                     <div className="tag-row">
@@ -232,15 +566,15 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
                       <li key={competitor.domain}>
                         <strong>{competitor.domain}</strong>
                         <p>
-                          {competitor.pages} sider, freshness {competitor.averageFreshness}, answer-first{" "}
-                          {competitor.averageAnswerFirst}, schema {competitor.schemaCoverage}
+                          {competitor.pages} sider analysert. Oppdaterthetsnivå {competitor.averageFreshness}/100,
+                          tydelighet i åpningen {competitor.averageAnswerFirst}/100, strukturerte data {competitor.schemaCoverage}/100.
                         </p>
                       </li>
                     ))}
                   </ul>
                 </div>
                 <div className="card">
-                  <h3>Gap-analyse</h3>
+                  <h3>Hvor du ligger bak</h3>
                   <ul className="list">
                     {report.competitiveContext.gaps.map((gap) => (
                       <li key={`${gap.category}-${gap.gapType}`}>
@@ -278,6 +612,7 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
                     <tr>
                       <th>Dato</th>
                       <th>Status</th>
+                      <th>Type</th>
                       <th>Score</th>
                       <th>Kategorier</th>
                     </tr>
@@ -291,6 +626,7 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
                         <td>
                           <StatusPill status={entry.status} />
                         </td>
+                        <td>{entry.request.mode === "page" ? "Sideanalyse" : "Domeneanalyse"}</td>
                         <td>{entry.summary ? <ScorePill score={entry.summary.totalScore} /> : "Venter"}</td>
                         <td>
                           {entry.summary
@@ -314,9 +650,142 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
             )}
           </section>
         </>
+        )
       )}
     </>
   );
+}
+
+function phaseLabel(phase: string) {
+  switch (phase) {
+    case "queued":
+      return "I kø";
+    case "discovering":
+      return "Oppdager nettstedet";
+    case "crawling":
+      return "Crawler sider";
+    case "rendering":
+      return "Sjekker SSR og rendering";
+    case "benchmarking":
+      return "Sammenligner konkurrenter";
+    case "analyzing":
+      return "Beregner rapport";
+    case "finalizing":
+      return "Lagrer resultatet";
+    case "completed":
+      return "Ferdig";
+    case "failed":
+      return "Feilet";
+    default:
+      return phase;
+  }
+}
+
+function formatEta(seconds: number) {
+  if (seconds < 60) {
+    return `${seconds} sek`;
+  }
+
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  if (minutes >= 10 || rest === 0) {
+    return `${minutes} min`;
+  }
+
+  return `${minutes} min ${rest} sek`;
+}
+
+function providerExplanation(score: number) {
+  if (score >= 80) {
+    return "Dette ser sterkt ut. Plattformen vil trolig ha gode forutsetninger for å finne, forstå og bruke innholdet ditt.";
+  }
+  if (score >= 60) {
+    return "Dette ser ganske bra ut, men det finnes noen tydelige forbedringsmuligheter som kan gi bedre synlighet.";
+  }
+  return "Her er det flere forhold som kan gjøre innholdet vanskeligere å finne, forstå eller sitere.";
+}
+
+function renderingLabel(model: string) {
+  switch (model) {
+    case "ssr":
+      return "Server-rendret";
+    case "hybrid":
+      return "Hybrid rendering";
+    case "csr":
+      return "Klient-rendret";
+    default:
+      return "Ukjent rendering";
+  }
+}
+
+function intentLabel(intent: string) {
+  switch (intent) {
+    case "informational":
+      return "Informasjonssøk";
+    case "commercial investigation":
+      return "Vurdering før kjøp";
+    case "transactional":
+      return "Klar for handling";
+    case "navigational":
+      return "Navigasjon";
+    default:
+      return intent;
+  }
+}
+
+function answerScoreLabel(score: number) {
+  if (score >= 80) {
+    return "Siden gir et tydelig svar tidlig";
+  }
+  if (score >= 60) {
+    return "Siden gir et delvis tydelig svar";
+  }
+  if (score >= 40) {
+    return "Siden kan bli tydeligere i åpningen";
+  }
+  return "Siden svarer for sent eller uklart";
+}
+
+function wordLabel(words: number) {
+  if (words >= 1600) {
+    return "Lang side";
+  }
+  if (words >= 700) {
+    return "Middels lang side";
+  }
+  return "Kort side";
+}
+
+function explainPage(page: AuditReport["pages"][number]) {
+  const parts: string[] = [];
+
+  if (page.rendering.renderingModel === "ssr") {
+    parts.push("Innholdet ser ut til å være tilgjengelig direkte i HTML, noe som vanligvis er bra for crawlere og AI-boter.");
+  } else if (page.rendering.renderingModel === "csr") {
+    parts.push("Siden ser ut til å være sterkt avhengig av klientrendering, noe som kan gjøre innholdet vanskeligere å hente og forstå.");
+  } else {
+    parts.push("Siden bruker en blanding av server- og klientrendering.");
+  }
+
+  if (page.answerFirstSignals.directAnswerLikelihood >= 70) {
+    parts.push("Den åpner relativt klart og er lettere å bruke i snippets og AI-svar.");
+  } else if (page.answerFirstSignals.directAnswerLikelihood < 50) {
+    parts.push("Den bør komme raskere til poenget med et kort svar rett under overskriften.");
+  }
+
+  if (!page.schema.types.length) {
+    parts.push("Det mangler strukturerte data, så siden sender svakere semantiske signaler til søk og AI.");
+  }
+
+  if (page.noindex) {
+    parts.push("Siden er merket med noindex og vil derfor normalt ikke bygges opp som synlig søkeinnhold.");
+  }
+
+  if (page.blockedByRobots) {
+    parts.push("Siden er blokkert i robots.txt, så deler av analysen og synligheten blir begrenset.");
+  }
+
+  return parts.join(" ");
 }
 
 function RecommendationCard({ recommendation }: { recommendation: Recommendation }) {
@@ -333,12 +802,12 @@ function RecommendationCard({ recommendation }: { recommendation: Recommendation
           <strong>Målområde</strong>
           <p>{recommendation.target}</p>
         </li>
-          <li>
-            <strong>Påvirker</strong>
+        <li>
+          <strong>Påvirker</strong>
           <p>{recommendation.providers.map((provider) => PROVIDER_LABELS[provider]).join(", ")}</p>
         </li>
-      <li>
-        <strong>Forslag</strong>
+        <li>
+          <strong>Forslag</strong>
           <p>{recommendation.action}</p>
         </li>
       </ul>
@@ -351,7 +820,7 @@ function IssueCard({ issue }: { issue: Issue }) {
     <article className="issue-card">
       <div className="button-row">
         <h3>{issue.title}</h3>
-        <span className="tag">{issue.priority}</span>
+        <span className="tag">{priorityLabel(issue.priority)}</span>
       </div>
       <p>{issue.description}</p>
       <ul className="list">
@@ -368,4 +837,66 @@ function IssueCard({ issue }: { issue: Issue }) {
       </ul>
     </article>
   );
+}
+
+function PageSuggestionCard({ suggestion }: { suggestion: AuditReport["pageSuggestions"][number] }) {
+  return (
+    <article className="recommendation">
+      <div className="button-row">
+        <h3>{suggestion.pageTitle}</h3>
+        <span className="tag">{intentLabel(suggestion.intent)}</span>
+      </div>
+      <p>{suggestion.proposed.contentLead}</p>
+      <ul className="list">
+        <li>
+          <strong>Foreslått struktur</strong>
+          <p>{suggestion.proposed.structure.join(" -> ")}</p>
+        </li>
+        <li>
+          <strong>Bedre metatittel</strong>
+          <p>{suggestion.proposed.metaTitle}</p>
+        </li>
+        <li>
+          <strong>Bedre metabeskrivelse</strong>
+          <p>{suggestion.proposed.metaDescription}</p>
+        </li>
+        <li>
+          <strong>Foreslått schema</strong>
+          <p>{suggestion.proposed.schemaType}</p>
+        </li>
+        <li>
+          <strong>Hvorfor dette bør endres</strong>
+          <p>{suggestion.rationale.join(" ")}</p>
+        </li>
+      </ul>
+      {suggestion.proposed.contentNotes.length ? (
+        <div className="tag-row">
+          {suggestion.proposed.contentNotes.map((note) => (
+            <span className="tag" key={note}>
+              {note}
+            </span>
+          ))}
+        </div>
+      ) : null}
+      <details>
+        <summary>Vis forslag til JSON-LD</summary>
+        <pre>{suggestion.proposed.jsonLd}</pre>
+      </details>
+    </article>
+  );
+}
+
+function priorityLabel(priority: Issue["priority"]) {
+  switch (priority) {
+    case "critical":
+      return "Kritisk";
+    case "high":
+      return "Høy";
+    case "medium":
+      return "Middels";
+    case "low":
+      return "Lav";
+    default:
+      return priority;
+  }
 }

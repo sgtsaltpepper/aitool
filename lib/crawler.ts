@@ -1,9 +1,14 @@
 import { load } from "cheerio";
 import { chromium } from "playwright";
 
-import { MAX_RENDER_CHECKS, PROVIDER_AGENTS } from "@/lib/config";
-import type { PageSnapshot, ProviderId, RobotsEvaluation } from "@/lib/types";
-import { extractTextTokens, formatDate, normalizeUrl, sameHost, unique } from "@/lib/utils";
+import {
+  COMPETITOR_CRAWL_CONCURRENCY,
+  MAX_RENDER_CHECKS,
+  PROVIDER_AGENTS,
+  TARGET_CRAWL_CONCURRENCY,
+} from "@/lib/config";
+import type { IndexNowStatus, PageSnapshot, ProviderId, RobotsEvaluation } from "@/lib/types";
+import { extractTextTokens, formatDate, normalizeUrl, sameHost, stripShortcodes, unique } from "@/lib/utils";
 
 type CrawlQueueItem = {
   url: string;
@@ -31,16 +36,32 @@ export type CrawlResult = {
   sitemapUrls: string[];
   blockedDiscoveredUrls: string[];
   crawlNotes: string[];
+  indexNowStatus: IndexNowStatus;
+};
+
+export type CrawlProgressEvent = {
+  phase: "discovering" | "crawling" | "rendering";
+  message: string;
+  pagesDiscovered: number;
+  pagesCrawled: number;
+  pagesTarget: number;
 };
 
 export async function crawlDomain(
   targetUrl: string,
   maxPages: number,
   includeRenderChecks = true,
+  onProgress?: (event: CrawlProgressEvent) => void,
 ): Promise<CrawlResult> {
   const seedUrl = normalizeUrl(targetUrl);
-  const host = new URL(seedUrl).hostname;
   const crawlNotes: string[] = [];
+  onProgress?.({
+    phase: "discovering",
+    message: "Leser robots.txt og sitemap...",
+    pagesDiscovered: 0,
+    pagesCrawled: 0,
+    pagesTarget: maxPages,
+  });
 
   const robots = await fetchRobots(seedUrl);
   const sitemapUrls = await collectSitemapUrls(seedUrl, robots);
@@ -55,73 +76,104 @@ export async function crawlDomain(
     }
 
     const normalized = normalizeUrl(sitemapUrl);
-    if (!seen.has(normalized)) {
-      seen.add(normalized);
-      queue.push({ url: normalized, discoveredFrom: "sitemap", clickDepth: 1 });
+    if (seen.has(normalized)) {
+      continue;
     }
+
+    seen.add(normalized);
+    queue.push({ url: normalized, discoveredFrom: "sitemap", clickDepth: 1 });
   }
 
-  while (queue.length && pageMap.size < maxPages) {
-    const item = queue.shift()!;
-    const path = new URL(item.url).pathname;
-    const robotsEvaluation = evaluateRobots(robots, path);
+  onProgress?.({
+    phase: "crawling",
+    message: "Crawler sider og henter metadata...",
+    pagesDiscovered: seen.size,
+    pagesCrawled: 0,
+    pagesTarget: maxPages,
+  });
 
-    if (!robotsEvaluation.generalAllowed) {
-      discoveredButBlocked.add(item.url);
-      pageMap.set(item.url, createBlockedSnapshot(item.url, item.discoveredFrom, item.clickDepth, robotsEvaluation));
-      continue;
-    }
+  const concurrency = includeRenderChecks ? TARGET_CRAWL_CONCURRENCY : COMPETITOR_CRAWL_CONCURRENCY;
+  const indexNowHeaderValues = new Set<string>();
 
-    const response = await fetchPage(item.url);
-    if (!response) {
-      crawlNotes.push(`Klarte ikke å hente ${item.url}`);
-      continue;
-    }
+  const worker = async () => {
+    while (pageMap.size < maxPages) {
+      const item = queue.shift();
+      if (!item) {
+        return;
+      }
 
-    const snapshot = await extractPageSnapshot({
-      url: item.url,
-      discoveredFrom: item.discoveredFrom,
-      clickDepth: item.clickDepth,
-      html: response.html,
-      statusCode: response.statusCode,
-      contentType: response.contentType,
-      headers: response.headers,
-      robotsEvaluation,
-    });
+      const path = new URL(item.url).pathname;
+      const robotsEvaluation = evaluateRobots(robots, path);
 
-    pageMap.set(item.url, snapshot);
-
-    if (!snapshot.contentType?.includes("text/html")) {
-      continue;
-    }
-
-    for (const link of snapshot.internalLinks) {
-      if (!sameHost(seedUrl, link)) {
+      if (!robotsEvaluation.generalAllowed) {
+        discoveredButBlocked.add(item.url);
+        pageMap.set(item.url, createBlockedSnapshot(item.url, item.discoveredFrom, item.clickDepth, robotsEvaluation));
+        emitProgress(onProgress, seen.size, pageMap.size, maxPages);
         continue;
       }
 
-      if (!isHtmlLikeUrl(link)) {
+      const response = await fetchPage(item.url);
+      if (!response) {
+        crawlNotes.push(`Klarte ikke å hente ${item.url}`);
+        emitProgress(onProgress, seen.size, pageMap.size, maxPages);
         continue;
       }
 
-      const normalized = normalizeUrl(link);
-      if (!new URL(normalized).hostname.endsWith(host) || seen.has(normalized)) {
-        continue;
+      const indexNowHeader = response.headers.get("x-indexnow-key");
+      if (indexNowHeader) {
+        indexNowHeaderValues.add(indexNowHeader);
       }
 
-      seen.add(normalized);
-      queue.push({
-        url: normalized,
-        discoveredFrom: "internal",
-        clickDepth: item.clickDepth + 1,
+      const snapshot = await extractPageSnapshot({
+        url: item.url,
+        discoveredFrom: item.discoveredFrom,
+        clickDepth: item.clickDepth,
+        html: response.html,
+        statusCode: response.statusCode,
+        contentType: response.contentType,
+        headers: response.headers,
+        robotsEvaluation,
       });
+
+      pageMap.set(item.url, snapshot);
+
+      if (snapshot.contentType?.includes("text/html")) {
+        for (const link of snapshot.internalLinks) {
+          if (!sameHost(seedUrl, link) || !isHtmlLikeUrl(link)) {
+            continue;
+          }
+
+          const normalized = normalizeUrl(link);
+          if (seen.has(normalized)) {
+            continue;
+          }
+
+          seen.add(normalized);
+          queue.push({
+            url: normalized,
+            discoveredFrom: "internal",
+            clickDepth: item.clickDepth + 1,
+          });
+        }
+      }
+
+      emitProgress(onProgress, seen.size, pageMap.size, maxPages);
     }
-  }
+  };
+
+  await Promise.all(Array.from({ length: concurrency }, () => worker()));
 
   const pages = [...pageMap.values()];
   annotateLinkGraph(pages);
 
   if (includeRenderChecks) {
+    onProgress?.({
+      phase: "rendering",
+      message: "Sammenligner rå HTML med rendret innhold...",
+      pagesDiscovered: seen.size,
+      pagesCrawled: pages.length,
+      pagesTarget: maxPages,
+    });
     await enrichRenderingSnapshots(pages);
   }
 
@@ -131,7 +183,142 @@ export async function crawlDomain(
     sitemapUrls,
     blockedDiscoveredUrls: [...discoveredButBlocked],
     crawlNotes,
+    indexNowStatus: await detectIndexNowStatus(seedUrl, indexNowHeaderValues),
   };
+}
+
+export async function crawlSinglePage(
+  targetUrl: string,
+  includeRenderChecks = true,
+  onProgress?: (event: CrawlProgressEvent) => void,
+): Promise<CrawlResult> {
+  const seedUrl = normalizeUrl(targetUrl);
+  const crawlNotes: string[] = [];
+
+  onProgress?.({
+    phase: "discovering",
+    message: "Leser robots.txt og forbereder sideanalyse...",
+    pagesDiscovered: 1,
+    pagesCrawled: 0,
+    pagesTarget: 1,
+  });
+
+  const robots = await fetchRobots(seedUrl);
+  const robotsEvaluation = evaluateRobots(robots, new URL(seedUrl).pathname);
+
+  if (!robotsEvaluation.generalAllowed) {
+    const blockedPage = createBlockedSnapshot(seedUrl, "seed", 0, robotsEvaluation);
+    return {
+      pages: [blockedPage],
+      robotsTxt: robots.raw,
+      sitemapUrls: [],
+      blockedDiscoveredUrls: [seedUrl],
+      crawlNotes,
+      indexNowStatus: await detectIndexNowStatus(seedUrl, new Set<string>()),
+    };
+  }
+
+  onProgress?.({
+    phase: "crawling",
+    message: "Henter siden og analyserer metadata...",
+    pagesDiscovered: 1,
+    pagesCrawled: 0,
+    pagesTarget: 1,
+  });
+
+  const response = await fetchPage(seedUrl);
+  if (!response) {
+    throw new Error("Klarte ikke å hente siden som skulle analyseres.");
+  }
+
+  const snapshot = await extractPageSnapshot({
+    url: seedUrl,
+    discoveredFrom: "seed",
+    clickDepth: 0,
+    html: response.html,
+    statusCode: response.statusCode,
+    contentType: response.contentType,
+    headers: response.headers,
+    robotsEvaluation,
+  });
+
+  const pages = [snapshot];
+  annotateLinkGraph(pages);
+
+  if (includeRenderChecks) {
+    onProgress?.({
+      phase: "rendering",
+      message: "Sammenligner rå HTML med rendret innhold...",
+      pagesDiscovered: 1,
+      pagesCrawled: 1,
+      pagesTarget: 1,
+    });
+    await enrichRenderingSnapshots(pages);
+  }
+
+  return {
+    pages,
+    robotsTxt: robots.raw,
+    sitemapUrls: [],
+    blockedDiscoveredUrls: [],
+    crawlNotes,
+    indexNowStatus: await detectIndexNowStatus(
+      seedUrl,
+      snapshot.xIndexNowKey ? new Set<string>([snapshot.xIndexNowKey]) : new Set<string>(),
+    ),
+  };
+}
+
+function emitProgress(
+  onProgress: ((event: CrawlProgressEvent) => void) | undefined,
+  pagesDiscovered: number,
+  pagesCrawled: number,
+  pagesTarget: number,
+): void {
+  onProgress?.({
+    phase: "crawling",
+    message: "Crawler sider og henter metadata...",
+    pagesDiscovered,
+    pagesCrawled,
+    pagesTarget,
+  });
+}
+
+async function detectIndexNowStatus(seedUrl: string, headerValues: Set<string>): Promise<IndexNowStatus> {
+  if (headerValues.size > 0) {
+    return "verified";
+  }
+
+  const configuredKey = process.env.INDEXNOW_KEY?.trim();
+  if (!configuredKey) {
+    return "unknown";
+  }
+
+  const candidateUrls = [
+    new URL(`/${configuredKey}.txt`, seedUrl).toString(),
+    new URL(`/.well-known/indexnow/${configuredKey}.txt`, seedUrl).toString(),
+  ];
+
+  for (const candidateUrl of candidateUrls) {
+    try {
+      const response = await fetch(candidateUrl, {
+        headers: { "user-agent": "AI-SEO-Audit/0.1" },
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        continue;
+      }
+
+      const body = (await response.text()).trim();
+      if (body === configuredKey) {
+        return "verified";
+      }
+    } catch {
+      // Ignore failures and continue.
+    }
+  }
+
+  return "not-detected";
 }
 
 function createBlockedSnapshot(
@@ -149,6 +336,7 @@ function createBlockedSnapshot(
     canonicalUrl: null,
     robotsMeta: [],
     xRobotsTag: [],
+    xIndexNowKey: null,
     title: "",
     metaDescription: "",
     h1: "",
@@ -230,10 +418,7 @@ async function fetchRobots(targetUrl: string): Promise<ParsedRobots> {
 
     const flush = () => {
       if (currentAgents.length) {
-        groups.push({
-          agents: currentAgents,
-          rules: currentRules,
-        });
+        groups.push({ agents: currentAgents, rules: currentRules });
       }
       currentAgents = [];
       currentRules = [];
@@ -258,10 +443,7 @@ async function fetchRobots(targetUrl: string): Promise<ParsedRobots> {
       }
 
       if (directive === "allow" || directive === "disallow") {
-        currentRules.push({
-          type: directive,
-          value,
-        });
+        currentRules.push({ type: directive, value });
         continue;
       }
 
@@ -275,12 +457,7 @@ async function fetchRobots(targetUrl: string): Promise<ParsedRobots> {
     }
 
     flush();
-
-    return {
-      groups,
-      sitemaps: unique(sitemaps),
-      raw,
-    };
+    return { groups, sitemaps: unique(sitemaps), raw };
   } catch {
     return { groups: [], sitemaps: [], raw: null };
   }
@@ -321,9 +498,8 @@ function isAllowedByRules(rules: RobotsGroup["rules"], path: string): boolean {
       continue;
     }
 
-    const length = rule.value.length;
-    if (!winner || length >= winner.length) {
-      winner = { type: rule.type, length };
+    if (!winner || rule.value.length >= winner.length) {
+      winner = { type: rule.type, length: rule.value.length };
     }
   }
 
@@ -455,16 +631,15 @@ async function extractPageSnapshot(input: {
   );
   const paragraphs = $("p")
     .toArray()
-    .map((node) => $(node).text().replace(/\s+/g, " ").trim())
+    .map((node) => stripShortcodes($(node).text().replace(/\s+/g, " ").trim()))
     .filter(Boolean);
   const firstParagraph = paragraphs[0] ?? "";
   const listCount = $("ul, ol").length;
   const tableCount = $("table").length;
   const faqCount = $('[itemtype*="FAQPage"], [itemtype*="Question"]').length;
   const definitionLikeBlocks = $("dl").length + $("p, li").toArray().filter((node) => $(node).text().includes(":")).length;
-  const canonicalUrl = $('link[rel="canonical"]').attr("href")
-    ? new URL($('link[rel="canonical"]').attr("href")!, input.url).toString()
-    : null;
+  const canonicalHref = $('link[rel="canonical"]').attr("href");
+  const canonicalUrl = canonicalHref ? new URL(canonicalHref, input.url).toString() : null;
   const robotsMeta = $('meta[name="robots"], meta[name="googlebot"], meta[name="bingbot"]')
     .toArray()
     .flatMap((node) => ($(node).attr("content") ?? "").split(","))
@@ -490,10 +665,10 @@ async function extractPageSnapshot(input: {
     .filter((href): href is string => Boolean(href));
   const internalLinks = resolvedLinks.filter((href) => sameHost(input.url, href));
   const externalLinks = resolvedLinks.filter((href) => !sameHost(input.url, href));
-  const scripts = $("script").length;
+  const scriptCount = $("script").length;
   const bodyClone = load(input.html);
   bodyClone("script, style, noscript, template").remove();
-  const bodyText = bodyClone("body").text().replace(/\s+/g, " ").trim();
+  const bodyText = stripShortcodes(bodyClone("body").text().replace(/\s+/g, " ").trim());
   const bodyTokens = extractTextTokens(bodyText);
   const images = $("img").toArray();
   const imagesWithoutAlt = images.filter((node) => !($(node).attr("alt") ?? "").trim()).length;
@@ -542,6 +717,7 @@ async function extractPageSnapshot(input: {
     canonicalUrl,
     robotsMeta,
     xRobotsTag,
+    xIndexNowKey: input.headers.get("x-indexnow-key"),
     title,
     metaDescription,
     h1,
@@ -549,7 +725,7 @@ async function extractPageSnapshot(input: {
     firstParagraph,
     bodyText,
     rawHtmlBytes: Buffer.byteLength(input.html, "utf8"),
-    scriptCount: scripts,
+    scriptCount,
     wordCount: bodyTokens.length,
     paragraphCount: paragraphs.length,
     listCount,
@@ -583,7 +759,7 @@ async function extractPageSnapshot(input: {
       rawTextLength: bodyText.length,
       renderedTextLength: null,
       renderDeltaRatio: null,
-      renderingModel: estimateRenderingModel(bodyText.length, scripts),
+      renderingModel: estimateRenderingModel(bodyText.length, scriptCount),
       extractedTextPreview: bodyText.slice(0, 300),
       errors: [],
     },
@@ -767,9 +943,7 @@ async function enrichRenderingSnapshots(pages: PageSnapshot[]): Promise<void> {
 
   try {
     for (const page of candidates) {
-      const context = await browser.newContext({
-        userAgent: "AI-SEO-Audit/0.1",
-      });
+      const context = await browser.newContext({ userAgent: "AI-SEO-Audit/0.1" });
       const tab = await context.newPage();
 
       try {

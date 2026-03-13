@@ -4,6 +4,7 @@ import { buildAuditReport } from "@/lib/analyzer";
 import type { AuditRequestInput, PageSnapshot } from "@/lib/types";
 
 const request: AuditRequestInput = {
+  mode: "domain",
   targetUrl: "https://example.no",
   locale: "nb-NO",
   country: "NO",
@@ -21,6 +22,7 @@ function createPage(overrides: Partial<PageSnapshot>): PageSnapshot {
     canonicalUrl: "https://example.no/",
     robotsMeta: [],
     xRobotsTag: [],
+    xIndexNowKey: null,
     title: "Eksempelside for AI SEO audit",
     metaDescription: "Beskrivelse som er lang nok til å telle som komplett metadata.",
     h1: "Hva er AI SEO audit?",
@@ -135,6 +137,7 @@ describe("buildAuditReport", () => {
       targetPages: [strongPage],
       competitorPagesByDomain: {},
       previousReport: null,
+      indexNowStatus: "unknown",
     });
     const weakReport = buildAuditReport({
       runId: "weak",
@@ -142,6 +145,7 @@ describe("buildAuditReport", () => {
       targetPages: [weakPage],
       competitorPagesByDomain: {},
       previousReport: null,
+      indexNowStatus: "unknown",
     });
 
     expect(strongReport.totalScore).toBeGreaterThan(weakReport.totalScore);
@@ -167,6 +171,7 @@ describe("buildAuditReport", () => {
       targetPages: [blockedPage],
       competitorPagesByDomain: {},
       previousReport: null,
+      indexNowStatus: "unknown",
     });
 
     expect(report.providerScores.find((item) => item.provider === "openai")?.blockers.join(" ")).toContain(
@@ -193,6 +198,7 @@ describe("buildAuditReport", () => {
       targetPages: [mismatchPage],
       competitorPagesByDomain: {},
       previousReport: null,
+      indexNowStatus: "unknown",
     });
 
     expect(report.issues.some((issue) => issue.id === "schema-mismatch")).toBe(true);
@@ -237,9 +243,119 @@ describe("buildAuditReport", () => {
         "konkurrent.no": [competitorPage, createPage({ url: "https://konkurrent.no/faq", path: "/faq" })],
       },
       previousReport: null,
+      indexNowStatus: "unknown",
     });
 
     expect(report.competitiveContext?.gaps.length).toBeGreaterThan(0);
     expect(report.competitiveContext?.gaps.some((gap) => gap.gapType === "answer-first-gap")).toBe(true);
+  });
+
+  it("oppretter ikke technical-metadata issue når technicalOptimization er god nok", () => {
+    const report = buildAuditReport({
+      runId: "technical-ok",
+      request,
+      targetPages: [createPage({})],
+      competitorPagesByDomain: {},
+      previousReport: null,
+      indexNowStatus: "verified",
+    });
+
+    expect(report.categoryScores.find((item) => item.id === "technicalOptimization")?.score).toBeGreaterThanOrEqual(70);
+    expect(report.issues.some((issue) => issue.id === "technical-metadata")).toBe(false);
+  });
+
+  it("setter indexNowStatus uten å lene seg på bodyText", () => {
+    const report = buildAuditReport({
+      runId: "indexnow",
+      request,
+      targetPages: [createPage({ bodyText: "Denne teksten nevner ikke noe spesielt." })],
+      competitorPagesByDomain: {},
+      previousReport: null,
+      indexNowStatus: "unknown",
+    });
+
+    expect(report.indexNowStatus).toBe("unknown");
+    expect(report.issues.some((issue) => issue.id === "indexnow-readiness")).toBe(true);
+  });
+
+  it("foreslår forbedret struktur, metadata og schema for en svak side", () => {
+    const weakPage = createPage({
+      title: "Planlegge julebord",
+      h1: "Planlegge julebord",
+      metaDescription: "Kort beskrivelse.",
+      schema: { types: [], itemCount: 0, matchesVisibleContent: true, rawItems: [] },
+      firstParagraph: "Vi hjelper deg.",
+      bodyText: "Vi hjelper deg å planlegge julebord. Ta kontakt.",
+      wordCount: 120,
+      listCount: 0,
+      tableCount: 0,
+      faqCount: 0,
+      answerFirstSignals: {
+        conciseOpening: false,
+        hasFaq: false,
+        hasTable: false,
+        hasList: false,
+        directAnswerLikelihood: 32,
+      },
+      author: null,
+      publisher: "Hvalstrand Bad",
+      datePublished: null,
+      dateModified: null,
+    });
+
+    const report = buildAuditReport({
+      runId: "suggestions",
+      request,
+      targetPages: [weakPage],
+      competitorPagesByDomain: {},
+      previousReport: null,
+      indexNowStatus: "unknown",
+    });
+
+    const suggestion = report.pageSuggestions[0];
+
+    expect(suggestion).toBeTruthy();
+    expect(suggestion.proposed.structure.length).toBeGreaterThanOrEqual(4);
+    expect(suggestion.proposed.sections.length).toBeGreaterThan(0);
+    expect(suggestion.proposed.faq.length).toBeGreaterThan(0);
+    expect(suggestion.proposed.cta.length).toBeGreaterThan(0);
+    expect(suggestion.proposed.metaTitle).toContain("Planlegge julebord");
+    expect(suggestion.proposed.metaTitle.length).toBeLessThanOrEqual(60);
+    expect(suggestion.proposed.metaDescription.length).toBeGreaterThan(100);
+    expect(suggestion.proposed.schemaType).toBeTruthy();
+    expect(suggestion.proposed.jsonLd).toContain("\"@context\": \"https://schema.org\"");
+    expect(suggestion.rationale.join(" ")).toContain("JSON-LD");
+  });
+
+  it("bygger egen pageReport for sideanalyse og analyserer kun én side", () => {
+    const pageRequest: AuditRequestInput = {
+      mode: "page",
+      targetUrl: "https://example.no/tryllekunstner",
+      locale: "nb-NO",
+      country: "NO",
+      competitorUrls: [],
+      maxPages: 1,
+    };
+    const report = buildAuditReport({
+      runId: "page-mode",
+      request: pageRequest,
+      targetPages: [
+        createPage({
+          url: "https://example.no/tryllekunstner",
+          path: "/tryllekunstner",
+          h1: "Tryllekunstner til event",
+          title: "Tryllekunstner til event",
+        }),
+      ],
+      competitorPagesByDomain: {},
+      previousReport: null,
+      indexNowStatus: "unknown",
+    });
+
+    expect(report.request.mode).toBe("page");
+    expect(report.pageReport?.current.url).toBe("https://example.no/tryllekunstner");
+    expect(report.pageReport?.proposed.structure.length).toBeGreaterThan(0);
+    expect(report.topicClusters).toHaveLength(0);
+    expect(report.competitiveContext).toBeNull();
   });
 });

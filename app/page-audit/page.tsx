@@ -7,50 +7,49 @@ import { listAuditRuns } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
-export default function HomePage() {
-  const runs = listAuditRuns(12);
+export default function PageAuditHomePage() {
+  const runs = listAuditRuns(20).filter((run) => run.request.mode === "page");
 
   return (
     <>
       <section className="hero">
         <div className="hero-copy">
-          <h1>Audit for AI-boter, SEO og innholdsstruktur</h1>
+          <h1>Sideanalyse for én URL</h1>
           <p>
-            Analyser offentlige nettsteder for ChatGPT, Gemini, Copilot, Perplexity og klassisk søk.
-            Verktøyet måler answer-first-innhold, rendering, schema, internlenking, topic clusters,
-            freshness og trust-signaler i én samlet rapport.
+            Lim inn en konkret side-URL og få en før/etter-gjennomgang av innhold, struktur,
+            metatittel, metabeskrivelse, FAQ, CTA og JSON-LD for akkurat denne siden.
           </p>
           <div className="hero-metrics">
-            <span className="metric-chip">SSR vs CSR</span>
-            <span className="metric-chip">Topic clusters</span>
-            <span className="metric-chip">Schema og entity-signaler</span>
-            <span className="metric-chip">Providerprofiler</span>
+            <span className="metric-chip">Kun én URL</span>
+            <span className="metric-chip">Før / etter</span>
+            <span className="metric-chip">Metadata og schema</span>
+            <span className="metric-chip">Seksjon-for-seksjon</span>
           </div>
         </div>
         <section className="panel">
-          <h2>Start en ny analyse</h2>
+          <h2>Start en ny sideanalyse</h2>
           <p>
-            Lim inn måldomenet, velg marked og legg eventuelt til konkurrenter. Første versjon er laget
-            for manuelle kjøringer og historikk i samme lokale verktøy.
+            Denne visningen crawler ikke hele domenet. Den analyserer bare URL-en du oppgir og
+            foreslår konkrete forbedringer for akkurat denne siden.
           </p>
           <div className="button-row">
-            <Link href="/page-audit" className="secondary-button">
-              Gå til sideanalyse
+            <Link href="/" className="secondary-button">
+              Til domeneanalyse
             </Link>
           </div>
           <AuditForm
             defaultLocale={DEFAULT_LOCALE}
             defaultCountry={DEFAULT_COUNTRY}
             defaultMaxPages={DEFAULT_MAX_PAGES}
-            mode="domain"
+            mode="page"
           />
         </section>
       </section>
 
       <section className="history-panel">
         <div className="section-header">
-          <h2>Historikk</h2>
-          <p>Se tidligere kjøringer, scoreutvikling og gå tilbake til rapportene.</p>
+          <h2>Historikk for sideanalyser</h2>
+          <p>Se tidligere kjøringer for enkeltsider og gå tilbake til rapportene.</p>
         </div>
 
         {runs.length ? (
@@ -58,11 +57,9 @@ export default function HomePage() {
             <table>
               <thead>
                 <tr>
-                  <th>Domene</th>
+                  <th>URL</th>
                   <th>Status</th>
-                  <th>Type</th>
                   <th>Score</th>
-                  <th>Sider</th>
                   <th>Opprettet</th>
                 </tr>
               </thead>
@@ -75,9 +72,7 @@ export default function HomePage() {
                     <td>
                       <StatusPill status={run.status} />
                     </td>
-                    <td>{run.request.mode === "page" ? "Sideanalyse" : "Domeneanalyse"}</td>
                     <td>{run.summary ? <ScorePill score={run.summary.totalScore} /> : "Venter"}</td>
-                    <td>{run.summary?.totalPages ?? "-"}</td>
                     <td>{new Date(run.createdAt).toLocaleString("nb-NO")}</td>
                   </tr>
                 ))}
@@ -86,8 +81,8 @@ export default function HomePage() {
           </div>
         ) : (
           <div className="empty-state">
-            <h3>Ingen analyser ennå</h3>
-            <p>Start den første audit-kjøringen for å få historikk og sammenligninger over tid.</p>
+            <h3>Ingen sideanalyser ennå</h3>
+            <p>Start en analyse av én konkret URL for å få første rapport.</p>
           </div>
         )}
       </section>

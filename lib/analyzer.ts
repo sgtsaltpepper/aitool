@@ -7,7 +7,12 @@ import type {
   CompetitiveContext,
   CompetitiveGap,
   EffortLevel,
+  IndexNowStatus,
   Issue,
+  PageAuditReport,
+  PageFaqSuggestion,
+  PageImprovementSuggestion,
+  PageSectionSuggestion,
   PageSnapshot,
   Priority,
   ProviderId,
@@ -47,6 +52,7 @@ type DomainMetrics = {
   uniqueIntents: SearchIntent[];
   topicClusters: TopicCluster[];
   hasIndexNowSignal: boolean;
+  indexNowStatus: IndexNowStatus;
 };
 
 type BuildReportInput = {
@@ -55,15 +61,21 @@ type BuildReportInput = {
   targetPages: PageSnapshot[];
   competitorPagesByDomain: Record<string, PageSnapshot[]>;
   previousReport: AuditReport | null;
+  indexNowStatus: IndexNowStatus;
 };
 
 export function buildAuditReport(input: BuildReportInput): AuditReport {
+  if (input.request.mode === "page") {
+    return buildSinglePageAuditReport(input);
+  }
+
   const targetTopicClusters = buildTopicClusters(input.targetPages);
-  const metrics = buildDomainMetrics(input.targetPages, targetTopicClusters);
+  const metrics = buildDomainMetrics(input.targetPages, targetTopicClusters, input.indexNowStatus);
   const categoryScores = buildCategoryScores(metrics);
   const issues = buildIssues(metrics, categoryScores);
   const recommendations = buildRecommendations(issues, metrics);
   const providerScores = buildProviderScores(metrics);
+  const pageSuggestions = buildPageSuggestions(input.targetPages);
   const competitiveContext = buildCompetitiveContext(metrics, input.competitorPagesByDomain);
   const totalScore = safeNumber(
     categoryScores.reduce((sum, category) => sum + (category.score * category.weight) / 100, 0),
@@ -77,18 +89,59 @@ export function buildAuditReport(input: BuildReportInput): AuditReport {
     generatedAt: new Date().toISOString(),
     totalScore,
     summary: buildSummary(metrics, providerScores, issues),
+    indexNowStatus: metrics.indexNowStatus,
     categoryScores,
     providerScores,
     issues,
     recommendations,
     pages: input.targetPages,
+    pageSuggestions,
+    pageReport: null,
     topicClusters: targetTopicClusters,
     competitiveContext,
     comparison,
   };
 }
 
-function buildDomainMetrics(pages: PageSnapshot[], topicClusters: TopicCluster[]): DomainMetrics {
+function buildSinglePageAuditReport(input: BuildReportInput): AuditReport {
+  const metrics = buildDomainMetrics(input.targetPages, [], input.indexNowStatus);
+  const categoryScores = buildCategoryScores(metrics);
+  const issues = buildIssues(metrics, categoryScores);
+  const recommendations = buildRecommendations(issues, metrics);
+  const providerScores = buildProviderScores(metrics);
+  const pageSuggestions = buildPageSuggestions(input.targetPages);
+  const totalScore = safeNumber(
+    categoryScores.reduce((sum, category) => sum + (category.score * category.weight) / 100, 0),
+    1,
+  );
+  const comparison = buildComparison(input.previousReport, totalScore, categoryScores);
+  const pageReport = buildPageReport(input.targetPages[0] ?? null, pageSuggestions[0] ?? null);
+
+  return {
+    runId: input.runId,
+    request: input.request,
+    generatedAt: new Date().toISOString(),
+    totalScore,
+    summary: buildPageSummary(input.targetPages[0] ?? null, providerScores, issues),
+    indexNowStatus: metrics.indexNowStatus,
+    categoryScores,
+    providerScores,
+    issues,
+    recommendations,
+    pages: input.targetPages,
+    pageSuggestions,
+    pageReport,
+    topicClusters: [],
+    competitiveContext: null,
+    comparison,
+  };
+}
+
+function buildDomainMetrics(
+  pages: PageSnapshot[],
+  topicClusters: TopicCluster[],
+  indexNowStatus: IndexNowStatus = "unknown",
+): DomainMetrics {
   const eligiblePages = pages.filter(
     (page) =>
       !page.blockedByRobots &&
@@ -165,7 +218,8 @@ function buildDomainMetrics(pages: PageSnapshot[], topicClusters: TopicCluster[]
     maxClickDepth: Math.max(0, ...eligiblePages.map((page) => page.clickDepth)),
     uniqueIntents,
     topicClusters,
-    hasIndexNowSignal: eligiblePages.some((page) => page.bodyText.toLowerCase().includes("indexnow")),
+    hasIndexNowSignal: indexNowStatus === "verified",
+    indexNowStatus,
   };
 }
 
@@ -192,11 +246,11 @@ function buildCategoryScores(metrics: DomainMetrics): CategoryScore[] {
       safeNumber(percent(metrics.orphanPages.length, Math.max(metrics.indexedPages, 1)) * 0.8) -
       safeNumber(percent(metrics.deepPages.length, Math.max(metrics.indexedPages, 1)) * 0.4),
   );
-  const intent = clamp(
-    metrics.topicClusters.length * 14 +
-      metrics.uniqueIntents.length * 18 -
-      metrics.topicClusters.filter((cluster) => cluster.pages.length === 1).length * 5,
-  );
+  const expectedClusters = Math.max(3, Math.floor(Math.max(metrics.indexedPages, 1) / 10));
+  const clusterCoverage = Math.min(1, metrics.topicClusters.length / expectedClusters);
+  const intentCoverage = Math.min(1, metrics.uniqueIntents.length / 4);
+  const clusterPenalty = Math.min(20, metrics.topicClusters.filter((cluster) => cluster.pages.length === 1).length * 3);
+  const intent = clamp(clusterCoverage * 62 + intentCoverage * 30 - clusterPenalty + 8);
   const zeroClick = clamp(
     metrics.answerFirstAverage * 0.5 +
       metrics.schemaCoverage * 0.2 +
@@ -217,71 +271,71 @@ function buildCategoryScores(metrics: DomainMetrics): CategoryScore[] {
       "crawlabilityIndexation",
       crawlability,
       metrics.orphanPages.length
-        ? `${metrics.orphanPages.length} foreldreløse sider eller blokkerte/noindex-ressurser svekker indekserbarheten.`
-        : "Robots, noindex og intern oppdagelse ser generelt sunne ut.",
+        ? `${metrics.orphanPages.length} sider er vanskelige å oppdage eller er delvis utilgjengelige for søk og crawlere.`
+        : "Det ser i hovedsak lett ut for søkemotorer og botene å finne og lese sidene.",
     ],
     [
       "renderingAiAccessibility",
       rendering,
       metrics.renderHeavyPages.length
-        ? `${metrics.renderHeavyPages.length} sider er avhengige av tung klientrendering.`
-        : "Det meste av innholdet er tilgjengelig uten tung klientrendering.",
+        ? `${metrics.renderHeavyPages.length} sider er mer avhengige av nettleseren enn ønskelig før innholdet blir synlig.`
+        : "Det meste av innholdet ser ut til å være tilgjengelig med en gang siden lastes.",
     ],
     [
       "answerFirstContent",
       answerFirst,
       metrics.answerFirstAverage >= 70
-        ? "Innholdet går raskt til svaret og har flere AI-/snippet-vennlige blokker."
-        : "Flere sider mangler korte svar høyere i innholdshierarkiet.",
+        ? "Innholdet kommer raskt til poenget og egner seg godt for raske svar og utdrag."
+        : "Flere sider bør bli tydeligere tidligere i teksten og svare raskere på brukerens spørsmål.",
     ],
     [
       "citationAuthorityEntitySignals",
       citation,
       metrics.authorTransparencyCoverage >= 70
-        ? "Forfatter-, publisher- og kontakt-signaler er godt representert."
-        : "Entity-, forfatter- eller transparenssignaler mangler på mange sider.",
+        ? "Det er ganske tydelig hvem som står bak innholdet og hvordan siden kan vurderes som troverdig."
+        : "Flere sider mangler tydelige signaler om avsender, ansvar og troverdighet.",
     ],
     [
       "schemaSemanticSearch",
       schema,
       metrics.schemaMismatchPages.length
-        ? `${metrics.schemaMismatchPages.length} sider har schema som ikke samsvarer tydelig med synlig innhold.`
-        : "Schema-dekning og semantiske signaler er i god form.",
+        ? `${metrics.schemaMismatchPages.length} sider sender strukturerte signaler som ikke matcher det brukeren faktisk ser.`
+        : "Strukturerte data og semantiske signaler ser jevnt over solide ut.",
     ],
     [
       "internalLinking",
       internalLinking,
       metrics.deepPages.length
-        ? `${metrics.deepPages.length} sider ligger dypt i klikkstien eller mangler nok interne lenker.`
-        : "Internlenker og klikkdybde støtter god crawlability.",
+        ? `${metrics.deepPages.length} sider ligger for dypt eller har for få interne innganger.`
+        : "Internlenkene hjelper brukere og crawlere med å forstå hvilke sider som hører sammen.",
     ],
     [
       "searchIntentTopicClusters",
       intent,
       metrics.topicClusters.length
-        ? `${metrics.topicClusters.length} topic clusters ble identifisert med ${metrics.uniqueIntents.length} intents.`
-        : "Det var for lite innhold til å bygge tydelige topic clusters.",
+        ? `${metrics.topicClusters.length} tydelige temagrupper ble identifisert, med ${metrics.uniqueIntents.length} ulike brukerintensjoner.`
+        : "Det var for lite eller for spredt innhold til å vise tydelige temagrupper.",
     ],
     [
       "zeroClickAiOverviews",
       zeroClick,
       metrics.snippetRestrictedPages.length
-        ? "Snippet-kontroller begrenser hvor mye som kan gjenbrukes i søkeresultater og AI-svar."
-        : "Innholdet virker relativt klart for snippets og AI-overviews.",
+        ? "Noen innstillinger begrenser hvor mye av innholdet som kan vises i utdrag og AI-sammendrag."
+        : "Innholdet ser forholdsvis godt egnet ut for utdrag og AI-sammendrag.",
     ],
     [
       "contentFreshness",
       freshness,
       metrics.freshnessCoverage >= 60
-        ? "Flere sider har synlige oppdateringssignaler og rimelig ferskhet."
-        : "Mangler i datofelt og få oppdateringssignaler svekker ferskhetsscoren.",
+        ? "Mange sider viser tydelig at innholdet holdes oppdatert."
+        : "Det er vanskelig å se hvor oppdatert innholdet er på flere sider.",
     ],
     [
       "technicalOptimization",
       technical,
       technical >= 75
-        ? "Titler, metabeskrivelser, canonicals og mediesignaler dekker det meste."
-        : "Tekniske metadata og mediesignaler har flere hull som er raske å tette.",
+        ? "De tekniske grunnsignalene er stort sett på plass."
+        : "Det er noen tekniske grunnsignaler som bør strammes opp for å løfte kvaliteten.",
     ],
   ];
 
@@ -301,6 +355,7 @@ function buildIssues(metrics: DomainMetrics, categoryScores: CategoryScore[]): I
     issues.push(
       issue(
         "rendering-csr",
+        "renderingAiAccessibility",
         "Client-side rendering skjuler innhold for crawlere",
         "Viktige sider får langt mer tekst først etter klientrendering, noe som øker risikoen for svak indeksering og dårlig AI-forståelse.",
         "critical",
@@ -314,6 +369,7 @@ function buildIssues(metrics: DomainMetrics, categoryScores: CategoryScore[]): I
     issues.push(
       issue(
         "schema-mismatch",
+        "schemaSemanticSearch",
         "Schema matcher ikke tydelig synlig innhold",
         "JSON-LD på flere sider ser ut til å beskrive annet innhold enn det brukeren og søkemotoren faktisk ser.",
         "high",
@@ -327,6 +383,7 @@ function buildIssues(metrics: DomainMetrics, categoryScores: CategoryScore[]): I
     issues.push(
       issue(
         "orphan-pages",
+        "internalLinking",
         "Foreldreløse sider svekker topic-clusters og crawlability",
         "Sider oppdaget via sitemap eller direkte URL mangler interne innganger, noe som gir svakere signaler om viktighet og klyngetilknytning.",
         "high",
@@ -340,6 +397,7 @@ function buildIssues(metrics: DomainMetrics, categoryScores: CategoryScore[]): I
     issues.push(
       issue(
         "snippet-controls",
+        "zeroClickAiOverviews",
         "Snippet-kontroller begrenser synlighet i SERP og AI-svar",
         "noSnippet, max-snippet=0 eller data-nosnippet er funnet på sider som ellers har godt answer-first-potensial.",
         "medium",
@@ -353,6 +411,7 @@ function buildIssues(metrics: DomainMetrics, categoryScores: CategoryScore[]): I
     issues.push(
       issue(
         "answer-first",
+        "answerFirstContent",
         "Sider svarer for sent eller for uklart",
         "Mange sider bruker for lang tid før de gir et direkte svar, noe som svekker både zero-click-resultater og siterbarhet.",
         "high",
@@ -369,6 +428,7 @@ function buildIssues(metrics: DomainMetrics, categoryScores: CategoryScore[]): I
     issues.push(
       issue(
         "trust-signals",
+        "citationAuthorityEntitySignals",
         "Svake forfatter- og transparenssignaler",
         "Innhold uten tydelig forfatter, publisher, om-side eller kontaktside er svakere på entity-forståelse og troverdighet.",
         "medium",
@@ -385,6 +445,7 @@ function buildIssues(metrics: DomainMetrics, categoryScores: CategoryScore[]): I
     issues.push(
       issue(
         "freshness",
+        "contentFreshness",
         "Mangler oppdateringsdato eller ferskhetssignaler",
         "Lite bruk av dateModified, article metadata eller synlige publiseringsdatoer gjør det vanskeligere å vurdere innholdets aktualitet.",
         "medium",
@@ -397,12 +458,15 @@ function buildIssues(metrics: DomainMetrics, categoryScores: CategoryScore[]): I
     );
   }
 
-  if (!metrics.hasIndexNowSignal) {
+  if (metrics.indexNowStatus !== "verified") {
     issues.push(
       issue(
         "indexnow-readiness",
+        "technicalOptimization",
         "Ingen tydelig IndexNow-beredskap funnet",
-        "Det ble ikke funnet signaler på at nettstedet aktivt pusher URL-endringer til Bing-økosystemet.",
+        metrics.indexNowStatus === "unknown"
+          ? "IndexNow kunne ikke verifiseres fordi verktøyet ikke har en konfigurert nøkkel å kontrollere mot."
+          : "Det ble ikke funnet tekniske signaler som bekrefter at nettstedet bruker IndexNow.",
         "low",
         [],
         ["bing"],
@@ -410,10 +474,11 @@ function buildIssues(metrics: DomainMetrics, categoryScores: CategoryScore[]): I
     );
   }
 
-  if (categoryScores.find((score) => score.id === "technicalOptimization")?.score ?? 0 < 70) {
+  if ((categoryScores.find((score) => score.id === "technicalOptimization")?.score ?? 0) < 70) {
     issues.push(
       issue(
         "technical-metadata",
+        "technicalOptimization",
         "Metadata og mediesignaler er ujevnt dekket",
         "Titler, metabeskrivelser, canonicals, alt-tekster eller transcript-signaler mangler på en del sider.",
         "medium",
@@ -624,12 +689,13 @@ function buildProviderScores(metrics: DomainMetrics): ProviderScore[] {
       snippetPenalty: metrics.hasIndexNowSignal ? 0 : 8,
       trustBoost: metrics.schemaCoverage * 0.04,
       summary:
-        metrics.hasIndexNowSignal && !metrics.snippetRestrictedPages.length
+        metrics.indexNowStatus === "verified" && !metrics.snippetRestrictedPages.length
           ? "Copilot/Bing har en god teknisk basis for raskere oppdagelse og utdrag."
           : "Copilot/Bing-profilen kan styrkes med snippet-kontroll, schema og raskere oppdagelsessignaler.",
       blockers: [
         ...collectBlockerLines(metrics.pages, "bing"),
-        ...(!metrics.hasIndexNowSignal ? ["Ingen tydelig IndexNow-beredskap funnet."] : []),
+        ...(metrics.indexNowStatus === "not-detected" ? ["IndexNow ble ikke bekreftet teknisk."] : []),
+        ...(metrics.indexNowStatus === "unknown" ? ["IndexNow kunne ikke verifiseres uten konfigurert nøkkel."] : []),
         ...(metrics.snippetRestrictedPages.length ? ["data-nosnippet eller andre snippet-kontroller hemmer utdrag."] : []),
       ],
       opportunities: ["Legg inn IndexNow i publiseringsflyten.", "Hold schema og canonical-signaler konsekvente."],
@@ -703,7 +769,7 @@ function buildCompetitiveContext(
 
   const competitors = domains.map(([domain, pages]) => {
     const clusters = buildTopicClusters(pages);
-    const competitorMetrics = buildDomainMetrics(pages, clusters);
+    const competitorMetrics = buildDomainMetrics(pages, clusters, "unknown");
     return {
       domain,
       pages: competitorMetrics.indexedPages,
@@ -809,6 +875,76 @@ function buildSummary(metrics: DomainMetrics, providerScores: ProviderScore[], i
   const clusterCount = metrics.topicClusters.length;
 
   return `Nettsiden har ${metrics.indexedPages} indeksérbare sider i analysen, ${clusterCount} topic clusters og en sterkest profil mot ${strongestProvider.label.toLowerCase()}. Største forbedringsområde akkurat nå er ${topIssue ? topIssue.title.toLowerCase() : "å styrke innholdssignalene ytterligere"}.`;
+}
+
+function buildPageSummary(page: PageSnapshot | null, providerScores: ProviderScore[], issues: Issue[]): string {
+  if (!page) {
+    return "Sideanalysen fant ikke lesbart HTML-innhold å jobbe med.";
+  }
+
+  const strongestProvider = [...providerScores].sort((a, b) => b.score - a.score)[0];
+  const topIssue = issues[0];
+  return `Denne sideanalysen ser kun på ${humanPath(page.url)}. Siden har sterkest utgangspunkt mot ${strongestProvider.label.toLowerCase()}, og viktigste forbedringsområde er ${topIssue ? topIssue.title.toLowerCase() : "å spisse innhold og metadata ytterligere"}.`;
+}
+
+function buildPageSuggestions(pages: PageSnapshot[]): PageImprovementSuggestion[] {
+  return pages
+    .filter(
+      (page) =>
+        !page.blockedByRobots &&
+        !page.noindex &&
+        page.contentType?.includes("text/html") &&
+        (page.statusCode === null || page.statusCode < 400),
+    )
+    .map((page) => {
+      const intent = classifyIntent(page);
+      const pageTitle = page.h1 || page.title || humanPath(page.url);
+      const focus = pickFocusPhrase(page);
+      const structure = proposeStructure(page, intent);
+      const contentLead = proposeContentLead(page, focus, intent);
+      const contentNotes = proposeContentNotes(page, intent);
+      const sections = proposeSections(page, focus, intent);
+      const faq = proposeFaq(focus, intent);
+      const cta = proposeCta(focus, intent);
+      const metaTitle = proposeMetaTitle(page, focus);
+      const metaDescription = proposeMetaDescription(page, focus, intent);
+      const schema = proposeSchema(page, focus, intent, metaDescription);
+      const proposedH1 = proposeH1(page, focus, intent);
+      const rationale = buildSuggestionRationale(page);
+
+      return {
+        url: page.url,
+        pageTitle,
+        intent,
+        current: {
+          metaTitle: page.title,
+          metaDescription: page.metaDescription,
+          schemaTypes: page.schema.types,
+          opening: page.firstParagraph || readableOpening(page.bodyText),
+          h1: page.h1,
+        },
+        proposed: {
+          structure,
+          h1: proposedH1,
+          contentLead,
+          contentNotes,
+          sections,
+          faq,
+          cta,
+          metaTitle,
+          metaDescription,
+          schemaType: schema.schemaType,
+          jsonLd: schema.jsonLd,
+        },
+        rationale,
+      };
+    })
+    .sort((left, right) => {
+      const leftNeed = suggestionNeedScore(left);
+      const rightNeed = suggestionNeedScore(right);
+      return rightNeed - leftNeed;
+    })
+    .slice(0, 15);
 }
 
 export function buildTopicClusters(pages: PageSnapshot[]): TopicCluster[] {
@@ -932,6 +1068,385 @@ function classifyIntent(page: PageSnapshot): SearchIntent {
   return "informational";
 }
 
+function pickFocusPhrase(page: PageSnapshot): string {
+  const raw = page.h1 || page.title || humanPath(page.url);
+  return raw.replace(/\s+[|\-:].*$/, "").trim();
+}
+
+function proposeH1(page: PageSnapshot, focus: string, intent: SearchIntent): string {
+  if (page.h1 && page.h1.length >= 10 && page.h1.length <= 70) {
+    return page.h1;
+  }
+
+  if (intent === "transactional") {
+    return `${focus} for arrangementer, booking og praktisk info`;
+  }
+
+  return `${focus} - det viktigste du trenger å vite`;
+}
+
+function proposeStructure(page: PageSnapshot, intent: SearchIntent): string[] {
+  const structure = [
+    "Kort svar rett under H1",
+    "Hovedpoeng eller nøkkelfordeler i punktliste",
+    "Utdypende forklaring med konkrete eksempler",
+  ];
+
+  if (intent === "commercial investigation") {
+    structure.push("Sammenligning av alternativer eller kriterier");
+  }
+  if (intent === "transactional") {
+    structure.push("Praktisk neste steg med tydelig CTA");
+  }
+  if (page.tableCount === 0 && intent !== "navigational") {
+    structure.push("Tabell eller faktaboks for raske svar");
+  }
+  if (!page.answerFirstSignals.hasFaq) {
+    structure.push("FAQ med 3-5 spørsmål");
+  }
+  if (!page.hasContactLink && intent !== "informational") {
+    structure.push("Kontakt eller bestillingsinformasjon");
+  }
+
+  return unique(structure);
+}
+
+function proposeContentLead(page: PageSnapshot, focus: string, intent: SearchIntent): string {
+  const actionLine =
+    intent === "transactional"
+      ? "Avslutt introduksjonen med hva brukeren skal gjøre videre og hva som skjer etterpå."
+      : intent === "commercial investigation"
+        ? "Gjør det tydelig hvordan brukeren skal vurdere alternativene."
+        : "Følg opp med konkrete detaljer, eksempler og neste spørsmål brukeren typisk har.";
+
+  return `${focus} bør forklares med et direkte svar i de første 2-3 setningene. Start med hva det er, hvem det er relevant for og den viktigste fordelen eller konsekvensen. ${actionLine}`;
+}
+
+function proposeContentNotes(page: PageSnapshot, intent: SearchIntent): string[] {
+  const notes: string[] = [];
+
+  if (page.answerFirstSignals.directAnswerLikelihood < 70) {
+    notes.push("Kort ned åpningen og flytt hovedsvaret opp før lange introduksjoner.");
+  }
+  if (!page.answerFirstSignals.hasList) {
+    notes.push("Bruk en punktliste for priser, fordeler, steg eller nøkkelfakta.");
+  }
+  if (!page.answerFirstSignals.hasFaq) {
+    notes.push("Legg inn FAQ som svarer på spørsmål brukeren kan ha før de tar neste steg.");
+  }
+  if (page.wordCount < 500 && intent !== "navigational") {
+    notes.push("Utvid siden med mer konkret substans, eksempler og begrepsforklaringer.");
+  }
+  if (!page.author && !page.publisher) {
+    notes.push("Vis tydelig avsender eller fagansvarlig for å styrke troverdighet og entity-signaler.");
+  }
+  if (!page.dateModified) {
+    notes.push("Vis sist oppdatert-dato når siden faktisk vedlikeholdes.");
+  }
+
+  return unique(notes).slice(0, 5);
+}
+
+function proposeSections(page: PageSnapshot, focus: string, intent: SearchIntent): PageSectionSuggestion[] {
+  const sections: PageSectionSuggestion[] = [
+    {
+      title: "Kort svar",
+      purpose: "Gi brukeren svaret med en gang etter H1.",
+      suggestedContent: `${focus} bør forklares i 2-3 korte setninger som sier hva dette er, hvem det passer for og hvorfor det er relevant.`,
+    },
+    {
+      title: "Dette får du",
+      purpose: "Vis konkrete fordeler eller hva opplevelsen faktisk inneholder.",
+      suggestedContent: "Bruk en punktliste med tydelige fordeler, høydepunkter eller leveranser.",
+    },
+    {
+      title: "Slik fungerer det",
+      purpose: "Senk terskelen ved å gjøre prosessen tydelig.",
+      suggestedContent: "Beskriv forløpet steg for steg, fra første kontakt til gjennomføring.",
+    },
+  ];
+
+  if (intent === "transactional") {
+    sections.push({
+      title: "Praktisk info og booking",
+      purpose: "Svar på det brukeren trenger for å ta neste steg.",
+      suggestedContent: "Vis prisindikasjon, varighet, tilgjengelighet, sted og tydelig bookingvei.",
+    });
+  } else {
+    sections.push({
+      title: "Når dette passer best",
+      purpose: "Hjelp brukeren å vurdere relevans.",
+      suggestedContent: "Forklar hvilke situasjoner, behov eller arrangementstyper denne siden passer for.",
+    });
+  }
+
+  if (!page.answerFirstSignals.hasFaq) {
+    sections.push({
+      title: "Vanlige spørsmål",
+      purpose: "Fang opp innvendinger og gjøre siden lettere å bruke i AI-svar.",
+      suggestedContent: "Svar kort på de 3-5 vanligste spørsmålene brukeren kan ha før de tar kontakt.",
+    });
+  }
+
+  return sections;
+}
+
+function proposeFaq(focus: string, intent: SearchIntent): PageFaqSuggestion[] {
+  const lowerFocus = focus.toLowerCase();
+  const secondAnswer =
+    intent === "transactional"
+      ? "Forklar hvordan booking, prisnivå, varighet og praktisk gjennomføring fungerer."
+      : "Forklar hvordan dette fungerer i praksis, hva som er inkludert og hva brukeren bør vite på forhånd.";
+
+  return [
+    {
+      question: `Hva innebærer ${lowerFocus}?`,
+      answer: `Gi et kort svar på hva ${lowerFocus} er, hvem det passer for og hva brukeren får ut av det.`,
+    },
+    {
+      question: `Hvordan fungerer ${lowerFocus} i praksis?`,
+      answer: secondAnswer,
+    },
+    {
+      question: `Hva er neste steg hvis jeg er interessert?`,
+      answer: "Fortell brukeren hvordan de tar kontakt, hva de bør oppgi og hvor raskt de kan forvente svar.",
+    },
+  ];
+}
+
+function proposeCta(focus: string, intent: SearchIntent): string {
+  if (intent === "transactional") {
+    return `Be om pris eller sjekk tilgjengelighet for ${focus.toLowerCase()}.`;
+  }
+
+  return `Ta kontakt for å høre hvordan ${focus.toLowerCase()} kan passe for ditt arrangement.`;
+}
+
+function proposeMetaTitle(page: PageSnapshot, focus: string): string {
+  const brand = page.publisher ?? new URL(page.url).hostname.replace(/^www\./, "");
+  const intent = classifyIntent(page);
+  let title = focus;
+
+  if (intent === "commercial investigation") {
+    title = `${focus} - sammenligning, fordeler og valg`;
+  } else if (intent === "transactional") {
+    title = `${focus} - priser, bestilling og praktisk info`;
+  } else if (!/(guide|faq|pris|bestill|kontakt)/i.test(focus)) {
+    title = `${focus} - guide og praktisk informasjon`;
+  }
+
+  const full = `${title} | ${brand}`;
+  return trimToLength(full, 60);
+}
+
+function proposeMetaDescription(page: PageSnapshot, focus: string, intent: SearchIntent): string {
+  const sentence =
+    intent === "transactional"
+      ? `Se hva ${focus.toLowerCase()} innebærer, hva du får og hvordan du går videre.`
+      : intent === "commercial investigation"
+        ? `Sammenlign ${focus.toLowerCase()}, få de viktigste vurderingspunktene og velg riktig løsning.`
+        : `Få et raskt svar på ${focus.toLowerCase()}, med forklaring, fakta og vanlige spørsmål.`;
+
+  const extra = page.dateModified
+    ? " Oppdatert informasjon og tydelige neste steg på ett sted."
+    : " Innholdet bør åpne tydelig og være lett å bruke i søk og AI-svar.";
+
+  return trimToLength(`${sentence}${extra}`, 155);
+}
+
+function proposeSchema(
+  page: PageSnapshot,
+  focus: string,
+  intent: SearchIntent,
+  metaDescription: string,
+): { schemaType: string; jsonLd: string } {
+  const primaryType = pickPrimarySchemaType(page, intent);
+  const graph: Array<Record<string, unknown>> = [
+    {
+      "@context": "https://schema.org",
+      "@type": primaryType,
+      "@id": `${page.url}#primary`,
+      url: page.url,
+      name: focus,
+      headline: focus,
+      description: metaDescription,
+      inLanguage: "nb-NO",
+      ...(page.datePublished ? { datePublished: page.datePublished } : {}),
+      ...(page.dateModified ? { dateModified: page.dateModified } : {}),
+      ...(page.author ? { author: { "@type": "Person", name: page.author } } : {}),
+      ...(page.publisher
+        ? {
+            publisher: {
+              "@type": "Organization",
+              name: page.publisher,
+            },
+          }
+        : {}),
+    },
+  ];
+
+  if (page.answerFirstSignals.hasFaq || page.faqCount > 0) {
+    graph.push({
+      "@context": "https://schema.org",
+      "@type": "FAQPage",
+      "@id": `${page.url}#faq`,
+      mainEntity: [
+        {
+          "@type": "Question",
+          name: `Hva bør brukeren vite om ${focus.toLowerCase()}?`,
+          acceptedAnswer: {
+            "@type": "Answer",
+            text: `Start med et kort svar på hva ${focus.toLowerCase()} er, hvem det passer for og hva neste steg er.`,
+          },
+        },
+        {
+          "@type": "Question",
+          name: `Hvordan fungerer ${focus.toLowerCase()} i praksis?`,
+          acceptedAnswer: {
+            "@type": "Answer",
+            text: "Forklar prosessen steg for steg med konkrete detaljer, priser eller kriterier der det er relevant.",
+          },
+        },
+      ],
+    });
+  }
+
+  const jsonLd = graph.length === 1 ? graph[0] : { "@context": "https://schema.org", "@graph": graph };
+
+  return {
+    schemaType: graph.length === 1 ? primaryType : `${primaryType} + FAQPage`,
+    jsonLd: JSON.stringify(jsonLd, null, 2),
+  };
+}
+
+function pickPrimarySchemaType(page: PageSnapshot, intent: SearchIntent): string {
+  if (intent === "transactional") {
+    return "Service";
+  }
+  if (page.author || page.datePublished || page.wordCount >= 700) {
+    return "Article";
+  }
+  return "WebPage";
+}
+
+function buildSuggestionRationale(page: PageSnapshot): string[] {
+  const rationale: string[] = [];
+
+  if (page.title.length < 35 || page.title.length > 60) {
+    rationale.push("Metatittelen bør bli tydeligere og mer fokusert.");
+  }
+  if (page.metaDescription.length < 120 || page.metaDescription.length > 160) {
+    rationale.push("Metabeskrivelsen kan bli mer presis og mer klikkvennlig.");
+  }
+  if (!page.schema.types.length) {
+    rationale.push("Siden mangler JSON-LD og sender derfor svakere semantiske signaler.");
+  } else if (!page.schema.matchesVisibleContent) {
+    rationale.push("Eksisterende schema bør skrives om så det matcher synlig innhold.");
+  }
+  if (page.answerFirstSignals.directAnswerLikelihood < 70) {
+    rationale.push("Åpningen bør svare raskere på hovedspørsmålet.");
+  }
+
+  if (!rationale.length) {
+    rationale.push("Siden er allerede ganske sterk, så forslagene handler mest om å spisse struktur og metadata.");
+  }
+
+  return rationale;
+}
+
+function buildPageReport(
+  page: PageSnapshot | null,
+  suggestion: PageImprovementSuggestion | null,
+): PageAuditReport | null {
+  if (!page || !suggestion) {
+    return null;
+  }
+
+  const changeSummary = [
+    suggestion.current.h1 !== suggestion.proposed.h1 ? "Spiss hovedoverskriften så siden forklarer verdien raskere." : null,
+    suggestion.current.metaTitle !== suggestion.proposed.metaTitle ? "Skriv en mer målrettet metatittel med tydelig tema og avsender." : null,
+    suggestion.current.metaDescription !== suggestion.proposed.metaDescription
+      ? "Skriv en metabeskrivelse som forklarer verdi og neste steg tydeligere."
+      : null,
+    !suggestion.current.schemaTypes.length
+      ? "Legg til JSON-LD slik at siden sender sterkere semantiske signaler."
+      : null,
+    page.answerFirstSignals.directAnswerLikelihood < 70
+      ? "Flytt hovedsvaret høyere opp og gjør åpningen mer konkret."
+      : null,
+  ].filter((item): item is string => Boolean(item));
+
+  const priorityActions = [
+    suggestion.proposed.structure[0],
+    suggestion.proposed.sections[0]?.title ? `Bygg ut seksjonen «${suggestion.proposed.sections[0].title}».` : null,
+    `Oppdater metadata til «${suggestion.proposed.metaTitle}».`,
+    `Legg inn ${suggestion.proposed.schemaType} som JSON-LD.`,
+  ].filter((item): item is string => Boolean(item));
+
+  return {
+    intent: suggestion.intent,
+    current: {
+      url: page.url,
+      title: page.title,
+      metaTitle: suggestion.current.metaTitle,
+      metaDescription: suggestion.current.metaDescription,
+      h1: suggestion.current.h1,
+      opening: suggestion.current.opening,
+      schemaTypes: suggestion.current.schemaTypes,
+      renderingModel: page.rendering.renderingModel,
+      answerScore: page.answerFirstSignals.directAnswerLikelihood,
+    },
+    proposed: {
+      metaTitle: suggestion.proposed.metaTitle,
+      metaDescription: suggestion.proposed.metaDescription,
+      h1: suggestion.proposed.h1,
+      opening: suggestion.proposed.contentLead,
+      structure: suggestion.proposed.structure,
+      sections: suggestion.proposed.sections,
+      faq: suggestion.proposed.faq,
+      cta: suggestion.proposed.cta,
+      schemaType: suggestion.proposed.schemaType,
+      jsonLd: suggestion.proposed.jsonLd,
+    },
+    changeSummary,
+    priorityActions,
+  };
+}
+
+function readableOpening(bodyText: string): string {
+  return bodyText.split(/\.\s+/).slice(0, 2).join(". ").trim();
+}
+
+function suggestionNeedScore(suggestion: PageImprovementSuggestion): number {
+  let score = 0;
+
+  if (suggestion.current.metaTitle.length < 35 || suggestion.current.metaTitle.length > 60) {
+    score += 3;
+  }
+  if (suggestion.current.metaDescription.length < 120 || suggestion.current.metaDescription.length > 160) {
+    score += 3;
+  }
+  if (!suggestion.current.schemaTypes.length) {
+    score += 3;
+  }
+  if (suggestion.rationale.some((item) => item.includes("Åpningen"))) {
+    score += 4;
+  }
+
+  return score;
+}
+
+function trimToLength(value: string, maxLength: number): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  const truncated = normalized.slice(0, maxLength);
+  const lastSpace = truncated.lastIndexOf(" ");
+  return truncated.slice(0, lastSpace > 20 ? lastSpace : maxLength).trim();
+}
+
 function majorityIntent(intents: SearchIntent[]): SearchIntent {
   const counts = new Map<SearchIntent, number>();
   for (const intent of intents) {
@@ -1013,6 +1528,7 @@ function collectBlockerLines(pages: PageSnapshot[], provider: ProviderId): strin
 
 function issue(
   id: string,
+  category: CategoryId,
   title: string,
   description: string,
   priority: Priority,
@@ -1021,7 +1537,7 @@ function issue(
 ): Issue {
   return {
     id,
-    category: title,
+    category,
     title,
     description,
     priority,

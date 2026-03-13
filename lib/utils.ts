@@ -109,3 +109,26 @@ export function humanPath(url: string): string {
   const parsed = new URL(url);
   return parsed.pathname === "/" ? parsed.hostname : `${parsed.hostname}${parsed.pathname}`;
 }
+
+export function stripShortcodes(value: string): string {
+  return value
+    .replace(/\[[^\]]+\]/g, " ")
+    .replace(/\{\{[^}]+\}\}/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+export function readableExcerpt(value: string, maxLength = 220): string {
+  const cleaned = stripShortcodes(value);
+  if (!cleaned) {
+    return "";
+  }
+
+  if (cleaned.length <= maxLength) {
+    return cleaned;
+  }
+
+  const truncated = cleaned.slice(0, maxLength);
+  const lastSpace = truncated.lastIndexOf(" ");
+  return `${truncated.slice(0, lastSpace > 80 ? lastSpace : maxLength).trim()}...`;
+}

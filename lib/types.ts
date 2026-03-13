@@ -6,6 +6,16 @@ export type ProviderId =
   | "citation";
 
 export type AuditStatus = "queued" | "running" | "completed" | "failed";
+export type AuditPhase =
+  | "queued"
+  | "discovering"
+  | "crawling"
+  | "rendering"
+  | "analyzing"
+  | "benchmarking"
+  | "finalizing"
+  | "completed"
+  | "failed";
 
 export type CategoryId =
   | "crawlabilityIndexation"
@@ -19,6 +29,8 @@ export type CategoryId =
   | "contentFreshness"
   | "technicalOptimization";
 
+export type IndexNowStatus = "verified" | "not-detected" | "unknown";
+
 export type Priority = "critical" | "high" | "medium" | "low";
 export type EffortLevel = "Quick wins" | "Middels innsats" | "Strategiske endringer";
 export type RecommendationImpact = "Høy" | "Middels" | "Lav";
@@ -28,7 +40,10 @@ export type SearchIntent =
   | "transactional"
   | "navigational";
 
+export type AuditMode = "domain" | "page";
+
 export type AuditRequestInput = {
+  mode: AuditMode;
   targetUrl: string;
   locale: string;
   country: string;
@@ -37,6 +52,7 @@ export type AuditRequestInput = {
 };
 
 export type AuditRunSummary = {
+  mode: AuditMode;
   totalScore: number;
   categoryScores: CategoryScore[];
   providerScores: ProviderScore[];
@@ -45,16 +61,31 @@ export type AuditRunSummary = {
   targetUrl: string;
 };
 
+export type AuditProgress = {
+  phase: AuditPhase;
+  message: string;
+  percent: number;
+  pagesDiscovered: number;
+  pagesCrawled: number;
+  pagesTarget: number;
+  competitorsCompleted: number;
+  competitorsTotal: number;
+  estimatedSecondsRemaining: number | null;
+  lastUpdatedAt: string;
+};
+
 export type AuditRunRecord = {
   id: string;
   targetUrl: string;
   status: AuditStatus;
   request: AuditRequestInput;
   summary: AuditRunSummary | null;
+  progress: AuditProgress;
   createdAt: string;
   startedAt: string | null;
   completedAt: string | null;
   errorMessage: string | null;
+  heartbeatAt: string | null;
 };
 
 export type RobotsEvaluation = {
@@ -88,6 +119,7 @@ export type PageSnapshot = {
   canonicalUrl: string | null;
   robotsMeta: string[];
   xRobotsTag: string[];
+  xIndexNowKey: string | null;
   title: string;
   metaDescription: string;
   h1: string;
@@ -145,7 +177,7 @@ export type CategoryScore = {
 
 export type Issue = {
   id: string;
-  category: string;
+  category: CategoryId;
   title: string;
   description: string;
   priority: Priority;
@@ -162,6 +194,73 @@ export type Recommendation = {
   target: string;
   providers: ProviderId[];
   action: string;
+};
+
+export type PageSectionSuggestion = {
+  title: string;
+  purpose: string;
+  suggestedContent: string;
+};
+
+export type PageFaqSuggestion = {
+  question: string;
+  answer: string;
+};
+
+export type PageImprovementSuggestion = {
+  url: string;
+  pageTitle: string;
+  intent: SearchIntent;
+  current: {
+    metaTitle: string;
+    metaDescription: string;
+    schemaTypes: string[];
+    opening: string;
+    h1: string;
+  };
+  proposed: {
+    structure: string[];
+    h1: string;
+    contentLead: string;
+    contentNotes: string[];
+    sections: PageSectionSuggestion[];
+    faq: PageFaqSuggestion[];
+    cta: string;
+    metaTitle: string;
+    metaDescription: string;
+    schemaType: string;
+    jsonLd: string;
+  };
+  rationale: string[];
+};
+
+export type PageAuditReport = {
+  intent: SearchIntent;
+  current: {
+    url: string;
+    title: string;
+    metaTitle: string;
+    metaDescription: string;
+    h1: string;
+    opening: string;
+    schemaTypes: string[];
+    renderingModel: RenderingSnapshot["renderingModel"];
+    answerScore: number;
+  };
+  proposed: {
+    metaTitle: string;
+    metaDescription: string;
+    h1: string;
+    opening: string;
+    structure: string[];
+    sections: PageSectionSuggestion[];
+    faq: PageFaqSuggestion[];
+    cta: string;
+    schemaType: string;
+    jsonLd: string;
+  };
+  changeSummary: string[];
+  priorityActions: string[];
 };
 
 export type TopicCluster = {
@@ -223,11 +322,14 @@ export type AuditReport = {
   generatedAt: string;
   totalScore: number;
   summary: string;
+  indexNowStatus: IndexNowStatus;
   categoryScores: CategoryScore[];
   providerScores: ProviderScore[];
   issues: Issue[];
   recommendations: Recommendation[];
   pages: PageSnapshot[];
+  pageSuggestions: PageImprovementSuggestion[];
+  pageReport: PageAuditReport | null;
   topicClusters: TopicCluster[];
   competitiveContext: CompetitiveContext | null;
   comparison: ReportComparison;
