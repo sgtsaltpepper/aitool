@@ -7,6 +7,7 @@ import type {
   CompetitiveContext,
   CompetitiveGap,
   EffortLevel,
+  ImplementationPack,
   IndexNowStatus,
   Issue,
   PageAuditReport,
@@ -76,6 +77,14 @@ export function buildAuditReport(input: BuildReportInput): AuditReport {
   const recommendations = buildRecommendations(issues, metrics);
   const providerScores = buildProviderScores(metrics);
   const pageSuggestions = buildPageSuggestions(input.targetPages);
+  const implementationPacks = buildImplementationPacks(
+    input.request.mode,
+    input.targetPages,
+    pageSuggestions,
+    categoryScores,
+    providerScores,
+    input.indexNowStatus,
+  );
   const competitiveContext = buildCompetitiveContext(metrics, input.competitorPagesByDomain);
   const totalScore = safeNumber(
     categoryScores.reduce((sum, category) => sum + (category.score * category.weight) / 100, 0),
@@ -97,6 +106,7 @@ export function buildAuditReport(input: BuildReportInput): AuditReport {
     pages: input.targetPages,
     pageSuggestions,
     pageReport: null,
+    implementationPacks,
     topicClusters: targetTopicClusters,
     competitiveContext,
     comparison,
@@ -110,6 +120,14 @@ function buildSinglePageAuditReport(input: BuildReportInput): AuditReport {
   const recommendations = buildRecommendations(issues, metrics);
   const providerScores = buildProviderScores(metrics);
   const pageSuggestions = buildPageSuggestions(input.targetPages);
+  const implementationPacks = buildImplementationPacks(
+    input.request.mode,
+    input.targetPages,
+    pageSuggestions,
+    categoryScores,
+    providerScores,
+    input.indexNowStatus,
+  );
   const totalScore = safeNumber(
     categoryScores.reduce((sum, category) => sum + (category.score * category.weight) / 100, 0),
     1,
@@ -131,6 +149,7 @@ function buildSinglePageAuditReport(input: BuildReportInput): AuditReport {
     pages: input.targetPages,
     pageSuggestions,
     pageReport,
+    implementationPacks,
     topicClusters: [],
     competitiveContext: null,
     comparison,
@@ -1411,6 +1430,191 @@ function buildPageReport(
     changeSummary,
     priorityActions,
   };
+}
+
+function buildImplementationPacks(
+  mode: AuditRequestInput["mode"],
+  pages: PageSnapshot[],
+  suggestions: PageImprovementSuggestion[],
+  categoryScores: CategoryScore[],
+  providerScores: ProviderScore[],
+  indexNowStatus: IndexNowStatus,
+): ImplementationPack[] {
+  const limit = mode === "page" ? 1 : 5;
+
+  return suggestions
+    .map((suggestion) => {
+      const page = pages.find((candidate) => candidate.url === suggestion.url);
+      if (!page) {
+        return null;
+      }
+
+      const simulatedPage = applySuggestionToSnapshot(page, suggestion);
+      const simulatedMetrics = buildDomainMetrics([simulatedPage], mode === "page" ? [] : buildTopicClusters([simulatedPage]), indexNowStatus);
+      const afterCategoryScores = buildCategoryScores(simulatedMetrics);
+      const afterProviderScores = buildProviderScores(simulatedMetrics);
+      const totalScoreBefore = safeNumber(
+        categoryScores.reduce((sum, category) => sum + (category.score * category.weight) / 100, 0),
+        1,
+      );
+      const totalScoreAfter = safeNumber(
+        afterCategoryScores.reduce((sum, category) => sum + (category.score * category.weight) / 100, 0),
+        1,
+      );
+
+      const patchBlocks = buildPatchBlocks(suggestion);
+      const evidence = unique([
+        ...suggestion.rationale,
+        ...suggestion.proposed.contentNotes,
+      ]).slice(0, 6);
+
+      return {
+        id: `impl-${suggestion.url}`,
+        url: suggestion.url,
+        pageTitle: suggestion.pageTitle,
+        mode,
+        currentSnapshot: {
+          h1: suggestion.current.h1,
+          opening: suggestion.current.opening,
+          metaTitle: suggestion.current.metaTitle,
+          metaDescription: suggestion.current.metaDescription,
+          schemaTypes: suggestion.current.schemaTypes,
+        },
+        proposedSnapshot: {
+          h1: suggestion.proposed.h1,
+          opening: suggestion.proposed.contentLead,
+          structure: suggestion.proposed.structure,
+          sections: suggestion.proposed.sections,
+          faq: suggestion.proposed.faq,
+          cta: suggestion.proposed.cta,
+          metaTitle: suggestion.proposed.metaTitle,
+          metaDescription: suggestion.proposed.metaDescription,
+          schemaType: suggestion.proposed.schemaType,
+          jsonLd: suggestion.proposed.jsonLd,
+        },
+        patchBlocks,
+        predictedImpact: {
+          totalScoreBefore,
+          totalScoreAfter,
+          totalScoreDelta: safeNumber(totalScoreAfter - totalScoreBefore),
+          categories: categoryScores.map((category) => {
+            const after = afterCategoryScores.find((item) => item.id === category.id)?.score ?? category.score;
+            return {
+              id: category.id,
+              before: category.score,
+              after,
+              delta: safeNumber(after - category.score),
+            };
+          }),
+          providers: providerScores.map((provider) => {
+            const after = afterProviderScores.find((item) => item.provider === provider.provider)?.score ?? provider.score;
+            return {
+              provider: provider.provider,
+              before: provider.score,
+              after,
+              delta: safeNumber(after - provider.score),
+            };
+          }),
+        },
+        evidence,
+      } satisfies ImplementationPack;
+    })
+    .filter((item): item is ImplementationPack => Boolean(item))
+    .sort((left, right) => right.predictedImpact.totalScoreDelta - left.predictedImpact.totalScoreDelta)
+    .slice(0, limit);
+}
+
+function applySuggestionToSnapshot(page: PageSnapshot, suggestion: PageImprovementSuggestion): PageSnapshot {
+  const improvedWordCount = Math.max(
+    page.wordCount,
+    extractTextTokens(
+      [
+        suggestion.proposed.contentLead,
+        ...suggestion.proposed.sections.map((section) => section.suggestedContent),
+        ...suggestion.proposed.faq.map((faq) => `${faq.question} ${faq.answer}`),
+        suggestion.proposed.cta,
+      ].join(" "),
+    ).length,
+  );
+
+  return {
+    ...page,
+    title: suggestion.proposed.metaTitle,
+    metaDescription: suggestion.proposed.metaDescription,
+    h1: suggestion.proposed.h1,
+    firstParagraph: suggestion.proposed.contentLead,
+    bodyText: [
+      suggestion.proposed.contentLead,
+      ...suggestion.proposed.sections.map((section) => `${section.title}. ${section.suggestedContent}`),
+      ...suggestion.proposed.faq.map((faq) => `${faq.question}. ${faq.answer}`),
+      suggestion.proposed.cta,
+    ].join(" "),
+    wordCount: improvedWordCount,
+    paragraphCount: Math.max(page.paragraphCount, suggestion.proposed.sections.length + 2),
+    listCount: Math.max(page.listCount, 1),
+    tableCount: Math.max(page.tableCount, suggestion.proposed.structure.some((item) => item.includes("Tabell")) ? 1 : page.tableCount),
+    faqCount: Math.max(page.faqCount, suggestion.proposed.faq.length ? 1 : 0),
+    schema: {
+      ...page.schema,
+      types: unique(
+        suggestion.proposed.schemaType
+          .split("+")
+          .map((item) => item.trim())
+          .filter(Boolean),
+      ),
+      itemCount: suggestion.proposed.schemaType.includes("FAQPage") ? 2 : 1,
+      matchesVisibleContent: true,
+    },
+    dateModified: page.dateModified ?? new Date().toISOString(),
+    answerFirstSignals: {
+      conciseOpening: true,
+      hasFaq: suggestion.proposed.faq.length > 0,
+      hasTable: suggestion.proposed.structure.some((item) => item.includes("Tabell")),
+      hasList: true,
+      directAnswerLikelihood: 92,
+    },
+  };
+}
+
+function buildPatchBlocks(suggestion: PageImprovementSuggestion): ImplementationPack["patchBlocks"] {
+  return [
+    {
+      id: "meta",
+      label: "Metadata",
+      content: [
+        `Metatittel: ${suggestion.proposed.metaTitle}`,
+        `Metabeskrivelse: ${suggestion.proposed.metaDescription}`,
+      ].join("\n"),
+    },
+    {
+      id: "headline",
+      label: "H1 og åpning",
+      content: [`H1: ${suggestion.proposed.h1}`, `Ingress: ${suggestion.proposed.contentLead}`].join("\n\n"),
+    },
+    {
+      id: "sections",
+      label: "Seksjonsutkast",
+      content: suggestion.proposed.sections
+        .map(
+          (section) =>
+            `## ${section.title}\nFormål: ${section.purpose}\n\n${section.suggestedContent}`,
+        )
+        .join("\n\n"),
+    },
+    {
+      id: "faq",
+      label: "FAQ og CTA",
+      content: [
+        ...suggestion.proposed.faq.map((faq) => `Q: ${faq.question}\nA: ${faq.answer}`),
+        `CTA: ${suggestion.proposed.cta}`,
+      ].join("\n\n"),
+    },
+    {
+      id: "schema",
+      label: "JSON-LD",
+      content: suggestion.proposed.jsonLd,
+    },
+  ];
 }
 
 function readableOpening(bodyText: string): string {

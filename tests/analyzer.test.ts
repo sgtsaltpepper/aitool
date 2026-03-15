@@ -355,7 +355,98 @@ describe("buildAuditReport", () => {
     expect(report.request.mode).toBe("page");
     expect(report.pageReport?.current.url).toBe("https://example.no/tryllekunstner");
     expect(report.pageReport?.proposed.structure.length).toBeGreaterThan(0);
+    expect(report.implementationPacks).toHaveLength(1);
     expect(report.topicClusters).toHaveLength(0);
     expect(report.competitiveContext).toBeNull();
+  });
+
+  it("bygger implementation pack med predicted impact for svak side", () => {
+    const weakPage = createPage({
+      title: "Kort side",
+      metaDescription: "Kort.",
+      h1: "Kort side",
+      firstParagraph: "",
+      bodyText: "Lite innhold.",
+      wordCount: 30,
+      listCount: 0,
+      tableCount: 0,
+      faqCount: 0,
+      schema: { types: [], itemCount: 0, matchesVisibleContent: true, rawItems: [] },
+      answerFirstSignals: {
+        conciseOpening: false,
+        hasFaq: false,
+        hasTable: false,
+        hasList: false,
+        directAnswerLikelihood: 18,
+      },
+      author: null,
+      publisher: null,
+      hasAboutLink: false,
+      hasContactLink: false,
+      datePublished: null,
+      dateModified: null,
+    });
+
+    const report = buildAuditReport({
+      runId: "implementation-pack",
+      request,
+      targetPages: [weakPage],
+      competitorPagesByDomain: {},
+      previousReport: null,
+      indexNowStatus: "unknown",
+    });
+
+    const pack = report.implementationPacks[0];
+
+    expect(pack).toBeTruthy();
+    expect(pack.patchBlocks.length).toBeGreaterThanOrEqual(4);
+    expect(pack.evidence.length).toBeGreaterThan(0);
+    expect(pack.predictedImpact.totalScoreAfter).toBeGreaterThanOrEqual(pack.predictedImpact.totalScoreBefore);
+    expect(
+      pack.predictedImpact.categories.find((item) => item.id === "answerFirstContent")?.after,
+    ).toBeGreaterThan(
+      pack.predictedImpact.categories.find((item) => item.id === "answerFirstContent")?.before ?? 0,
+    );
+    expect(
+      pack.predictedImpact.categories.find((item) => item.id === "schemaSemanticSearch")?.after,
+    ).toBeGreaterThan(
+      pack.predictedImpact.categories.find((item) => item.id === "schemaSemanticSearch")?.before ?? 0,
+    );
+    expect(
+      pack.predictedImpact.categories.find((item) => item.id === "zeroClickAiOverviews")?.after,
+    ).toBeGreaterThan(
+      pack.predictedImpact.categories.find((item) => item.id === "zeroClickAiOverviews")?.before ?? 0,
+    );
+  });
+
+  it("begrenser implementation packs i domain mode til toppsider", () => {
+    const pages = Array.from({ length: 7 }, (_, index) =>
+      createPage({
+        url: `https://example.no/page-${index}`,
+        path: `/page-${index}`,
+        title: `Side ${index}`,
+        h1: `Side ${index}`,
+        metaDescription: index < 5 ? "Kort." : "Denne beskrivelsen er lang nok til å se bedre ut i testen.",
+        schema: index < 5 ? { types: [], itemCount: 0, matchesVisibleContent: true, rawItems: [] } : { types: ["Article"], itemCount: 1, matchesVisibleContent: true, rawItems: [] },
+        answerFirstSignals: {
+          conciseOpening: index >= 5,
+          hasFaq: false,
+          hasTable: false,
+          hasList: false,
+          directAnswerLikelihood: index < 5 ? 20 : 70,
+        },
+      }),
+    );
+
+    const report = buildAuditReport({
+      runId: "implementation-limit",
+      request,
+      targetPages: pages,
+      competitorPagesByDomain: {},
+      previousReport: null,
+      indexNowStatus: "unknown",
+    });
+
+    expect(report.implementationPacks.length).toBeLessThanOrEqual(5);
   });
 });

@@ -157,6 +157,7 @@ describe("db audit lifecycle", () => {
       ],
       pageSuggestions: [],
       pageReport: null,
+      implementationPacks: [],
       topicClusters: [],
       competitiveContext: null,
       comparison: {

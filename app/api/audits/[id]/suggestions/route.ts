@@ -37,9 +37,46 @@ function buildSuggestionsMarkdown(report: NonNullable<ReturnType<typeof getAudit
     `Generert: ${new Date(report.generatedAt).toLocaleString("nb-NO")}`,
     `Samlet score: ${report.totalScore}`,
     "",
-    "Denne eksporten viser konkrete sideforslag for struktur, innhold, metadata og JSON-LD.",
+    "Denne eksporten viser konkrete sideforslag, implementation packs og forventet effekt for struktur, innhold, metadata og JSON-LD.",
     "",
   ];
+
+  if (report.implementationPacks.length) {
+    lines.push("## Implementation Packs");
+    lines.push("");
+
+    for (const pack of report.implementationPacks) {
+      lines.push(`### ${pack.pageTitle}`);
+      lines.push("");
+      lines.push(`- URL: ${pack.url}`);
+      lines.push(
+        `- Predicted impact: ${pack.predictedImpact.totalScoreBefore} -> ${pack.predictedImpact.totalScoreAfter} (delta ${pack.predictedImpact.totalScoreDelta >= 0 ? "+" : ""}${pack.predictedImpact.totalScoreDelta})`,
+      );
+      lines.push("");
+      lines.push("#### Before / after");
+      lines.push("");
+      lines.push(`- H1: ${pack.currentSnapshot.h1 || "Ingen"} -> ${pack.proposedSnapshot.h1}`);
+      lines.push(`- Metatittel: ${pack.currentSnapshot.metaTitle || "Ingen"} -> ${pack.proposedSnapshot.metaTitle}`);
+      lines.push(
+        `- Metabeskrivelse: ${pack.currentSnapshot.metaDescription || "Ingen"} -> ${pack.proposedSnapshot.metaDescription}`,
+      );
+      lines.push("");
+      lines.push("#### Evidence");
+      lines.push("");
+      pack.evidence.forEach((item) => lines.push(`- ${item}`));
+      lines.push("");
+      lines.push("#### Patch blocks");
+      lines.push("");
+      pack.patchBlocks.forEach((block) => {
+        lines.push(`##### ${block.label}`);
+        lines.push("");
+        lines.push("```md");
+        lines.push(block.content);
+        lines.push("```");
+        lines.push("");
+      });
+    }
+  }
 
   for (const suggestion of report.pageSuggestions) {
     lines.push(`## ${suggestion.pageTitle}`);
@@ -107,6 +144,31 @@ function buildPageAuditMarkdown(report: NonNullable<ReturnType<typeof getAuditRe
     "",
     "Denne eksporten viser før/etter-forslag for akkurat denne siden.",
     "",
+    "## Implementation Pack",
+    "",
+  ];
+
+  if (report.implementationPacks[0]) {
+    const pack = report.implementationPacks[0];
+    lines.push(`- Predicted impact: ${pack.predictedImpact.totalScoreBefore} -> ${pack.predictedImpact.totalScoreAfter}`);
+    lines.push("");
+    lines.push("### Evidence");
+    lines.push("");
+    pack.evidence.forEach((item) => lines.push(`- ${item}`));
+    lines.push("");
+    lines.push("### Patch blocks");
+    lines.push("");
+    pack.patchBlocks.forEach((block) => {
+      lines.push(`#### ${block.label}`);
+      lines.push("");
+      lines.push("```md");
+      lines.push(block.content);
+      lines.push("```");
+      lines.push("");
+    });
+  }
+
+  lines.push(
     "## Nå-situasjonen",
     "",
     `- URL: ${pageReport.current.url}`,
@@ -134,7 +196,7 @@ function buildPageAuditMarkdown(report: NonNullable<ReturnType<typeof getAuditRe
     "",
     "### Seksjoner",
     "",
-  ];
+  );
 
   for (const section of pageReport.proposed.sections) {
     lines.push(`#### ${section.title}`);

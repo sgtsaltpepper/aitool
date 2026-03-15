@@ -5,7 +5,7 @@ import { AutoRefresh } from "@/components/AutoRefresh";
 import { ScorePill, StatusPill } from "@/components/Badges";
 import { CATEGORY_LABELS, PROVIDER_LABELS } from "@/lib/config";
 import { getAuditReport, getAuditRun, listAuditRuns } from "@/lib/db";
-import type { AuditReport, Issue, Recommendation } from "@/lib/types";
+import type { AuditReport, ImplementationPack, Issue, Recommendation } from "@/lib/types";
 import { humanPath, readableExcerpt, summarizeList } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -145,6 +145,18 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
                   ))}
                 </ul>
               </div>
+            </div>
+          </section>
+
+          <section className="report-grid">
+            <div className="section-header">
+              <h2>Implementation Pack</h2>
+              <p>Dette er den konkrete leveransen du kan bruke til å oppdatere siden med én gang.</p>
+            </div>
+            <div className="recommendations-grid">
+              {report.implementationPacks.map((pack) => (
+                <ImplementationPackCard key={pack.id} pack={pack} />
+              ))}
             </div>
           </section>
 
@@ -451,6 +463,18 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
             <div className="recommendations-grid">
               {report.recommendations.map((recommendation) => (
                 <RecommendationCard key={recommendation.id} recommendation={recommendation} />
+              ))}
+            </div>
+          </section>
+
+          <section className="report-grid">
+            <div className="section-header">
+              <h2>Implementation Packs</h2>
+              <p>Her får du ferdige endringspakker for sidene med størst sannsynlig gevinst.</p>
+            </div>
+            <div className="recommendations-grid">
+              {report.implementationPacks.map((pack) => (
+                <ImplementationPackCard key={pack.id} pack={pack} />
               ))}
             </div>
           </section>
@@ -881,6 +905,79 @@ function PageSuggestionCard({ suggestion }: { suggestion: AuditReport["pageSugge
       <details>
         <summary>Vis forslag til JSON-LD</summary>
         <pre>{suggestion.proposed.jsonLd}</pre>
+      </details>
+    </article>
+  );
+}
+
+function ImplementationPackCard({ pack }: { pack: ImplementationPack }) {
+  const topCategoryChanges = pack.predictedImpact.categories
+    .filter((item) => item.delta > 0)
+    .sort((left, right) => right.delta - left.delta)
+    .slice(0, 4);
+  const topProviderChanges = pack.predictedImpact.providers
+    .filter((item) => item.delta > 0)
+    .sort((left, right) => right.delta - left.delta)
+    .slice(0, 3);
+
+  return (
+    <article className="recommendation">
+      <div className="button-row">
+        <h3>{pack.pageTitle}</h3>
+        <span className="tag">{pack.mode === "page" ? "Sideanalyse" : "Domeneanalyse"}</span>
+        <span className="tag">
+          Forventet +{pack.predictedImpact.totalScoreDelta} score
+        </span>
+      </div>
+      <p>{humanPath(pack.url)}</p>
+      <ul className="list">
+        <li>
+          <strong>Before / after</strong>
+          <p>
+            H1: {pack.currentSnapshot.h1 || "Ingen tydelig H1"} {"->"} {pack.proposedSnapshot.h1}
+          </p>
+          <p>
+            Metatittel: {pack.currentSnapshot.metaTitle || "Ingen"} {"->"} {pack.proposedSnapshot.metaTitle}
+          </p>
+          <p>
+            Metabeskrivelse: {pack.currentSnapshot.metaDescription || "Ingen"} {"->"} {pack.proposedSnapshot.metaDescription}
+          </p>
+        </li>
+        <li>
+          <strong>Predicted impact</strong>
+          <p>
+            Total score {pack.predictedImpact.totalScoreBefore} {"->"} {pack.predictedImpact.totalScoreAfter}
+          </p>
+          <p>
+            {topCategoryChanges.length
+              ? topCategoryChanges
+                  .map((item) => `${CATEGORY_LABELS[item.id]} +${item.delta}`)
+                  .join(", ")
+              : "Ingen tydelige kategoriløft beregnet."}
+          </p>
+          <p>
+            {topProviderChanges.length
+              ? topProviderChanges
+                  .map((item) => `${PROVIDER_LABELS[item.provider]} +${item.delta}`)
+                  .join(", ")
+              : "Ingen tydelige provider-løft beregnet."}
+          </p>
+        </li>
+        <li>
+          <strong>Hvorfor denne pakken finnes</strong>
+          <p>{pack.evidence.join(" ")}</p>
+        </li>
+      </ul>
+      <details>
+        <summary>Vis implementation blocks</summary>
+        {pack.patchBlocks.map((block) => (
+          <div key={block.id}>
+            <p>
+              <strong>{block.label}</strong>
+            </p>
+            <pre>{block.content}</pre>
+          </div>
+        ))}
       </details>
     </article>
   );

@@ -263,6 +263,61 @@ export type PageAuditReport = {
   priorityActions: string[];
 };
 
+export type PredictedCategoryImpact = {
+  id: CategoryId;
+  before: number;
+  after: number;
+  delta: number;
+};
+
+export type PredictedProviderImpact = {
+  provider: ProviderId;
+  before: number;
+  after: number;
+  delta: number;
+};
+
+export type PredictedImpact = {
+  totalScoreBefore: number;
+  totalScoreAfter: number;
+  totalScoreDelta: number;
+  categories: PredictedCategoryImpact[];
+  providers: PredictedProviderImpact[];
+};
+
+export type ImplementationPack = {
+  id: string;
+  url: string;
+  pageTitle: string;
+  mode: AuditMode;
+  currentSnapshot: {
+    h1: string;
+    opening: string;
+    metaTitle: string;
+    metaDescription: string;
+    schemaTypes: string[];
+  };
+  proposedSnapshot: {
+    h1: string;
+    opening: string;
+    structure: string[];
+    sections: PageSectionSuggestion[];
+    faq: PageFaqSuggestion[];
+    cta: string;
+    metaTitle: string;
+    metaDescription: string;
+    schemaType: string;
+    jsonLd: string;
+  };
+  patchBlocks: Array<{
+    id: string;
+    label: string;
+    content: string;
+  }>;
+  predictedImpact: PredictedImpact;
+  evidence: string[];
+};
+
 export type TopicCluster = {
   id: string;
   name: string;
@@ -330,6 +385,7 @@ export type AuditReport = {
   pages: PageSnapshot[];
   pageSuggestions: PageImprovementSuggestion[];
   pageReport: PageAuditReport | null;
+  implementationPacks: ImplementationPack[];
   topicClusters: TopicCluster[];
   competitiveContext: CompetitiveContext | null;
   comparison: ReportComparison;
