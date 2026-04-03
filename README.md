@@ -8,7 +8,8 @@ Internt Next.js-verktøy for å analysere om et nettsted er optimalisert for bå
 - Leser `robots.txt`, `sitemap.xml`, metadata, canonicals, schema og internlenker
 - Sammenligner rå HTML med rendret DOM via Playwright for å avdekke CSR vs SSR
 - Beregner kategoriscorer, providerprofiler, topic clusters og konkurransegap
-- Lagrer historikk lokalt i SQLite
+- Analyserer E-E-A-T-signaler (Experience, Expertise, Authoritativeness, Trust)
+- Lagrer score-historikk i SQLite for trendanalyse over tid
 
 ## Kjør lokalt
 
@@ -19,11 +20,30 @@ npm run dev
 
 Åpne deretter [http://localhost:3000](http://localhost:3000).
 
+## Kjør med Docker
+
+```bash
+docker compose up
+```
+
+Appen er tilgjengelig på [http://localhost:3000](http://localhost:3000). Data lagres i et lokalt volum under `.data/`.
+
+For debugging med inspector:
+
+```bash
+docker compose -f compose.debug.yaml up
+```
+
 ## API
 
-- `POST /api/audits`
-- `GET /api/audits/:id`
-- `GET /api/audits/:id/report`
+| Metode | Endepunkt | Beskrivelse |
+|--------|-----------|-------------|
+| `POST` | `/api/audits` | Start ny analyse |
+| `GET` | `/api/audits/:id` | Hent status og fremdrift |
+| `GET` | `/api/audits/:id/report` | Hent fullstendig rapport |
+| `GET` | `/api/audits/:id/suggestions` | Eksporter anbefalinger som Markdown |
+| `GET` | `/api/audits/trends?domain=&days=` | Historiske scorer for et domene |
+| `GET` | `/api/queue/worker` | Gjenopprett ventende jobber (cron-trigger) |
 
 Eksempel på `POST /api/audits`:
 
@@ -37,12 +57,16 @@ Eksempel på `POST /api/audits`:
 }
 ```
 
+Sett miljøvariabelen `WORKER_SECRET` for å beskytte `/api/queue/worker` med en Bearer-token.
+
 ## Viktige mapper
 
 - `app/`: UI og API-ruter
-- `components/`: klientkomponenter og badges
-- `lib/`: crawler, analysemotor, jobbkjører, typer og database
-- `tests/`: tester for scorings- og anbefalingslogikk
+- `components/scoring/`: TrendChart og score-komponenter
+- `lib/crawler/`: HTTP-crawler og strategisk render-budsjett
+- `lib/engines/`: Answer quality, E-E-A-T og fremtidige analysemotorer
+- `lib/`: Analyzer, jobbkjører, database og typer
+- `tests/`: Tester for scorings- og anbefalingslogikk
 
 ## Merknad
 
