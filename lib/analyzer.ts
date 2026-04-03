@@ -918,17 +918,20 @@ function buildPageSuggestions(pages: PageSnapshot[]): PageImprovementSuggestion[
     .map((page) => {
       const intent = classifyIntent(page);
       const pageTitle = page.h1 || page.title || humanPath(page.url);
-      const focus = pickFocusPhrase(page);
+      const keyword = extractKeyword(page);
+      const brand = extractBrandName(page);
+      // Keep focus for backward-compat with functions not yet updated
+      const focus = keyword;
       const structure = proposeStructure(page, intent);
-      const contentLead = proposeContentLead(page, focus, intent);
-      const contentNotes = proposeContentNotes(page, intent);
-      const sections = proposeSections(page, focus, intent);
-      const faq = proposeFaq(focus, intent);
-      const cta = proposeCta(focus, intent);
-      const metaTitle = proposeMetaTitle(page, focus);
-      const metaDescription = proposeMetaDescription(page, focus, intent);
+      const metaTitle = proposeMetaTitle(page, keyword, brand);
+      const metaDescription = proposeMetaDescription(page, keyword, brand, intent);
+      const contentLead = proposeContentLead(page, keyword, brand, intent);
+      const contentNotes = proposeContentNotes(page, intent, keyword, brand, metaTitle, metaDescription, contentLead);
+      const sections = proposeSections(page, keyword, brand, intent);
+      const faq = proposeFaq(keyword, brand, intent);
+      const cta = proposeCta(keyword, intent);
       const schema = proposeSchema(page, focus, intent, metaDescription);
-      const proposedH1 = proposeH1(page, focus, intent);
+      const proposedH1 = proposeH1(page, keyword, brand, intent);
       const rationale = buildSuggestionRationale(page);
 
       return {
@@ -1087,21 +1090,96 @@ function classifyIntent(page: PageSnapshot): SearchIntent {
   return "informational";
 }
 
-function pickFocusPhrase(page: PageSnapshot): string {
-  const raw = page.h1 || page.title || humanPath(page.url);
-  return raw.replace(/\s+[|\-:].*$/, "").trim();
+/**
+ * Extracts the primary topic/service keyword from a page.
+ *
+ * Priority order:
+ * 1. URL path segments (most specific: /tryllekunstner → "Tryllekunstner")
+ * 2. RIGHT side of H1 separator ("Denis Stone - Tryllekunstner" → "Tryllekunstner")
+ * 3. LEFT side of title separator ("SEO Guide | Firma" → "SEO Guide")
+ * 4. Full H1 or title as fallback
+ *
+ * This is intentionally the opposite of the old pickFocusPhrase, which kept
+ * the brand name (left side) and threw away the service keyword (right side).
+ */
+function extractKeyword(page: PageSnapshot): string {
+  // 1. URL path: /tryllekunstner, /magic-shows, /bedriftsarrangement
+  const pathSegments = page.path
+    .split("/")
+    .filter((s) => s.length > 3 && !/^\d+$/.test(s))
+    .filter((s) => !/(index|home|page|start|om|about|kontakt|contact|privacy|vilkar|blogg|blog)/.test(s));
+
+  if (pathSegments.length > 0) {
+    const last = pathSegments[pathSegments.length - 1]!.replace(/[-_]/g, " ").replace(/\.\w+$/, "");
+    if (last.length > 3 && last.length < 55) {
+      return last.charAt(0).toUpperCase() + last.slice(1);
+    }
+  }
+
+  const h1 = (page.h1 || "").trim();
+  const title = (page.title || "").trim();
+
+  // 2. RIGHT side of H1 separator (brand – service → service is the keyword)
+  const h1Right = h1.match(/\s*[-–|]\s*(.{4,55})$/);
+  if (h1Right) {
+    const candidate = h1Right[1]!.trim();
+    if (candidate.split(" ").length <= 7) return candidate;
+  }
+
+  // 3. LEFT side of title separator (service | brand → service is the keyword)
+  const titleLeft = title.match(/^(.{4,55?})\s*[-–|:]/);
+  if (titleLeft) {
+    const candidate = titleLeft[1]!.trim();
+    const generic = /(hjem|home|velkommen|welcome|start|nyheter|news)$/i.test(candidate);
+    if (!generic && candidate.split(" ").length <= 7) return candidate;
+  }
+
+  // 4. Full H1 stripped of separator tails, or title
+  return (h1 || title).replace(/\s+[|\-–:].*$/, "").trim() || humanPath(page.url);
 }
 
-function proposeH1(page: PageSnapshot, focus: string, intent: SearchIntent): string {
+/**
+ * Extracts the brand/person name to use as a secondary qualifier in suggestions.
+ * Looks at publisher, author, Organization schema, and domain name.
+ */
+function extractBrandName(page: PageSnapshot): string {
+  if (page.publisher) return page.publisher;
+  if (page.author) return page.author;
+
+  // Check Organization/Person schema
+  const hasOrgSchema = page.schema.types.some((t) =>
+    ["Organization", "LocalBusiness", "Person", "Corporation"].includes(t),
+  );
+
+  // If H1 has a separator, the LEFT side is typically the brand/person name
+  const h1 = (page.h1 || "").trim();
+  const h1Left = h1.match(/^(.{2,40}?)\s*[-–|]/);
+  if (h1Left && hasOrgSchema) return h1Left[1]!.trim();
+
+  // Fall back to domain name without TLD
+  const hostname = new URL(page.url).hostname.replace(/^www\./, "");
+  return hostname.split(".")[0]!.charAt(0).toUpperCase() + hostname.split(".")[0]!.slice(1);
+}
+
+/** @deprecated Use extractKeyword instead */
+function pickFocusPhrase(page: PageSnapshot): string {
+  return extractKeyword(page);
+}
+
+function proposeH1(page: PageSnapshot, keyword: string, brand: string, intent: SearchIntent): string {
+  // Keep existing H1 if it's already well-formed
   if (page.h1 && page.h1.length >= 10 && page.h1.length <= 70) {
     return page.h1;
   }
 
   if (intent === "transactional") {
-    return `${focus} for arrangementer, booking og praktisk info`;
+    return `${keyword} – priser, booking og praktisk info`;
+  }
+  if (intent === "commercial investigation") {
+    return `${keyword} – sammenlign, vurder og velg riktig`;
   }
 
-  return `${focus} - det viktigste du trenger å vite`;
+  return `${keyword} – komplett guide med fakta og vanlige spørsmål`;
 }
 
 function proposeStructure(page: PageSnapshot, intent: SearchIntent): string[] {
@@ -1130,147 +1208,193 @@ function proposeStructure(page: PageSnapshot, intent: SearchIntent): string[] {
   return unique(structure);
 }
 
-function proposeContentLead(page: PageSnapshot, focus: string, intent: SearchIntent): string {
-  const actionLine =
-    intent === "transactional"
-      ? "Avslutt introduksjonen med hva brukeren skal gjøre videre og hva som skjer etterpå."
-      : intent === "commercial investigation"
-        ? "Gjør det tydelig hvordan brukeren skal vurdere alternativene."
-        : "Følg opp med konkrete detaljer, eksempler og neste spørsmål brukeren typisk har.";
+function proposeContentLead(page: PageSnapshot, keyword: string, brand: string, intent: SearchIntent): string {
+  const kw = keyword.toLowerCase();
+  const br = brand;
 
-  return `${focus} bør forklares med et direkte svar i de første 2-3 setningene. Start med hva det er, hvem det er relevant for og den viktigste fordelen eller konsekvensen. ${actionLine}`;
+  if (intent === "transactional") {
+    return `${br} tilbyr ${kw} til bedriftsarrangementer, selskapsfester og private tilstelninger. Fyll ut kontaktskjemaet nedenfor for å motta et uforpliktende pristilbud.`;
+  }
+  if (intent === "commercial investigation") {
+    return `${kw} fra ${br} – se hva som er inkludert, hvilke alternativer som finnes og hva som skiller dem fra hverandre.`;
+  }
+
+  // Informational: write a direct definitional opener
+  const schemaHint = page.schema.types.includes("Person")
+    ? `${br} er ${kw}`
+    : page.schema.types.some((t) => ["Service", "LocalBusiness"].includes(t))
+      ? `${kw} fra ${br} er`
+      : `${kw} er`;
+
+  return `${schemaHint} [én setning med hva dette er og hvem det passer for]. [Legg til den viktigste fordelen eller konsekvensen i setning to.] De vanligste spørsmålene er besvart nedenfor.`;
 }
 
-function proposeContentNotes(page: PageSnapshot, intent: SearchIntent): string[] {
+function proposeContentNotes(
+  page: PageSnapshot,
+  intent: SearchIntent,
+  keyword: string,
+  brand: string,
+  proposedTitle: string,
+  proposedDescription: string,
+  proposedLead: string,
+): string[] {
   const notes: string[] = [];
+  const kw = keyword.toLowerCase();
 
   if (page.answerFirstSignals.directAnswerLikelihood < 70) {
-    notes.push("Kort ned åpningen og flytt hovedsvaret opp før lange introduksjoner.");
+    notes.push(`Flytt hovedsvaret øverst. Foreslått åpningssetning: «${proposedLead.split(".")[0]}.»`);
+  }
+  if (page.title.length < 15 || !page.title.toLowerCase().includes(kw.split(" ")[0]!)) {
+    notes.push(`Foreslått metatittel: «${proposedTitle}»`);
+  }
+  if (page.metaDescription.length < 50 || !page.metaDescription.toLowerCase().includes(kw.split(" ")[0]!)) {
+    notes.push(`Foreslått metabeskrivelse: «${proposedDescription}»`);
   }
   if (!page.answerFirstSignals.hasList) {
-    notes.push("Bruk en punktliste for priser, fordeler, steg eller nøkkelfakta.");
+    notes.push(`Legg til en punktliste med 4–6 nøkkelfakta om ${kw} (f.eks. hva som er inkludert, pris, varighet, geografi).`);
   }
   if (!page.answerFirstSignals.hasFaq) {
-    notes.push("Legg inn FAQ som svarer på spørsmål brukeren kan ha før de tar neste steg.");
+    notes.push(`Legg til FAQ med spørsmål som «Hva koster ${kw}?», «Hvordan bestiller jeg ${kw}?» og «Passer ${kw} for mitt arrangement?»`);
   }
   if (page.wordCount < 500 && intent !== "navigational") {
-    notes.push("Utvid siden med mer konkret substans, eksempler og begrepsforklaringer.");
+    notes.push(`Siden har ${page.wordCount} ord – utvid med konkrete eksempler, priser og casebeskrivelser.`);
   }
   if (!page.author && !page.publisher) {
-    notes.push("Vis tydelig avsender eller fagansvarlig for å styrke troverdighet og entity-signaler.");
+    notes.push(`Legg til byline eller «Om ${brand}»-seksjon for å styrke E-E-A-T og troverdighet.`);
   }
   if (!page.dateModified) {
-    notes.push("Vis sist oppdatert-dato når siden faktisk vedlikeholdes.");
+    notes.push("Vis «Sist oppdatert»-dato i innholdsmal og speil den i Article-schema.");
   }
 
   return unique(notes).slice(0, 5);
 }
 
-function proposeSections(page: PageSnapshot, focus: string, intent: SearchIntent): PageSectionSuggestion[] {
+function proposeSections(
+  page: PageSnapshot,
+  keyword: string,
+  brand: string,
+  intent: SearchIntent,
+): PageSectionSuggestion[] {
+  const kw = keyword.toLowerCase();
   const sections: PageSectionSuggestion[] = [
     {
-      title: "Kort svar",
-      purpose: "Gi brukeren svaret med en gang etter H1.",
-      suggestedContent: `${focus} bør forklares i 2-3 korte setninger som sier hva dette er, hvem det passer for og hvorfor det er relevant.`,
+      title: `Hva er ${kw}?`,
+      purpose: "Gi søkemotorer og AI-assistenter et direkte, siterbart svar rett under H1.",
+      suggestedContent: `${keyword} er [én setning: definisjon + hvem det passer for]. ${brand} tilbyr [hva] for [hvem] i [geografi]. Inkluder nøkkelord som søkere bruker, f.eks. «${kw} til bedriftsarrangement» eller «bestill ${kw}».`,
     },
     {
-      title: "Dette får du",
-      purpose: "Vis konkrete fordeler eller hva opplevelsen faktisk inneholder.",
-      suggestedContent: "Bruk en punktliste med tydelige fordeler, høydepunkter eller leveranser.",
+      title: `Hva får du med ${kw} fra ${brand}?`,
+      purpose: "Dokumenter konkret hva som er inkludert – dette er det AI siterer mest.",
+      suggestedContent: `Punktliste med 4–6 konkrete leveranser, f.eks.:\n• [Varighet / lengde på show]\n• [Antall gjester som dekkes]\n• [Type triks / format]\n• [Teknisk utstyr som følger med]\n• [Oppfølging / tilpasning]`,
     },
     {
-      title: "Slik fungerer det",
-      purpose: "Senk terskelen ved å gjøre prosessen tydelig.",
-      suggestedContent: "Beskriv forløpet steg for steg, fra første kontakt til gjennomføring.",
+      title: "Slik bestiller du",
+      purpose: "Fjern friksjon – brukeren skal vite nøyaktig hva neste steg er.",
+      suggestedContent: `1. Fyll ut kontaktskjema eller ring [telefonnummer]\n2. Oppgi dato, sted og antall gjester\n3. Motta uforpliktende tilbud innen [x virkedager]\n4. Bekreft og signer avtale`,
     },
   ];
 
   if (intent === "transactional") {
     sections.push({
-      title: "Praktisk info og booking",
-      purpose: "Svar på det brukeren trenger for å ta neste steg.",
-      suggestedContent: "Vis prisindikasjon, varighet, tilgjengelighet, sted og tydelig bookingvei.",
+      title: "Pris og praktisk info",
+      purpose: "De fleste forlater siden fordi de ikke finner prisinformasjon – gi dem et prisanslag.",
+      suggestedContent: `${keyword} koster fra [prisantydning] kr for [arrangement/varighet]. Prisen avhenger av [faktorer]. Ta kontakt for eksakt pristilbud.`,
     });
   } else {
     sections.push({
-      title: "Når dette passer best",
-      purpose: "Hjelp brukeren å vurdere relevans.",
-      suggestedContent: "Forklar hvilke situasjoner, behov eller arrangementstyper denne siden passer for.",
+      title: `Når passer ${kw}?`,
+      purpose: "Hjelp brukeren å kvalifisere seg selv – dette reduserer irrelevante henvendelser.",
+      suggestedContent: `${keyword} passer best for:\n• Bedriftsarrangementer og kick-off\n• Selskapsfester og jubileer\n• Private tilstelninger som bursdager\n• [Legg til aktuelle arrangementstyper]`,
     });
   }
 
   if (!page.answerFirstSignals.hasFaq) {
     sections.push({
-      title: "Vanlige spørsmål",
-      purpose: "Fang opp innvendinger og gjøre siden lettere å bruke i AI-svar.",
-      suggestedContent: "Svar kort på de 3-5 vanligste spørsmålene brukeren kan ha før de tar kontakt.",
+      title: "Vanlige spørsmål om " + kw,
+      purpose: "FAQ-seksjoner øker sannsynlighet for svar i AI-overviews og featured snippets betraktelig.",
+      suggestedContent: `Legg til FAQPage schema og svar på spørsmål som:\n• «Hva koster ${kw}?»\n• «Passer ${kw} for [typisk scenario]?»\n• «Hvordan bestiller jeg ${kw} fra ${brand}?»\n• «Hvor lang tid i forveien bør jeg bestille?»`,
     });
   }
 
   return sections;
 }
 
-function proposeFaq(focus: string, intent: SearchIntent): PageFaqSuggestion[] {
-  const lowerFocus = focus.toLowerCase();
-  const secondAnswer =
+function proposeFaq(keyword: string, brand: string, intent: SearchIntent): PageFaqSuggestion[] {
+  const kw = keyword.toLowerCase();
+
+  const bookingAnswer =
     intent === "transactional"
-      ? "Forklar hvordan booking, prisnivå, varighet og praktisk gjennomføring fungerer."
-      : "Forklar hvordan dette fungerer i praksis, hva som er inkludert og hva brukeren bør vite på forhånd.";
+      ? `Ta kontakt med ${brand} via kontaktskjema eller telefon. Oppgi ønsket dato, sted og antall gjester, så sender vi et uforpliktende tilbud.`
+      : `Ta kontakt med ${brand} for å diskutere behov og tilgjengelighet.`;
 
   return [
     {
-      question: `Hva innebærer ${lowerFocus}?`,
-      answer: `Gi et kort svar på hva ${lowerFocus} er, hvem det passer for og hva brukeren får ut av det.`,
+      question: `Hva er ${kw}?`,
+      answer: `${keyword} er [én setning med klar definisjon]. ${brand} leverer [hva] for [hvem] – [viktigste fordel eller USP].`,
     },
     {
-      question: `Hvordan fungerer ${lowerFocus} i praksis?`,
-      answer: secondAnswer,
+      question: `Hva koster ${kw}?`,
+      answer: `Prisen for ${kw} fra ${brand} starter fra [X] kr og avhenger av [varighet / antall gjester / tilpasning]. Kontakt oss for eksakt pristilbud.`,
     },
     {
-      question: `Hva er neste steg hvis jeg er interessert?`,
-      answer: "Fortell brukeren hvordan de tar kontakt, hva de bør oppgi og hvor raskt de kan forvente svar.",
+      question: `Passer ${kw} for bedriftsarrangementer?`,
+      answer: `Ja, ${kw} fra ${brand} er godt egnet for bedriftsarrangementer, kick-off, konferanser og teambuilding. Vi tilpasser programmet etter ditt arrangement og antall gjester.`,
+    },
+    {
+      question: `Hvordan bestiller jeg ${kw}?`,
+      answer: bookingAnswer,
     },
   ];
 }
 
-function proposeCta(focus: string, intent: SearchIntent): string {
+function proposeCta(keyword: string, intent: SearchIntent): string {
+  const kw = keyword.toLowerCase();
   if (intent === "transactional") {
-    return `Be om pris eller sjekk tilgjengelighet for ${focus.toLowerCase()}.`;
+    return `Be om pris på ${kw} – fyll ut skjemaet og motta tilbud innen [X] virkedager.`;
   }
-
-  return `Ta kontakt for å høre hvordan ${focus.toLowerCase()} kan passe for ditt arrangement.`;
+  if (intent === "commercial investigation") {
+    return `Sammenlign alternativer eller ta kontakt for en uforpliktende prat om ${kw}.`;
+  }
+  return `Har du spørsmål om ${kw}? Ta kontakt – vi svarer raskt.`;
 }
 
-function proposeMetaTitle(page: PageSnapshot, focus: string): string {
-  const brand = page.publisher ?? new URL(page.url).hostname.replace(/^www\./, "");
+function proposeMetaTitle(page: PageSnapshot, keyword: string, brand: string): string {
   const intent = classifyIntent(page);
-  let title = focus;
+  const kw = keyword;
 
+  let title: string;
   if (intent === "commercial investigation") {
-    title = `${focus} - sammenligning, fordeler og valg`;
+    title = `${kw} – sammenligning, fordeler og hva du bør vite`;
   } else if (intent === "transactional") {
-    title = `${focus} - priser, bestilling og praktisk info`;
-  } else if (!/(guide|faq|pris|bestill|kontakt)/i.test(focus)) {
-    title = `${focus} - guide og praktisk informasjon`;
+    title = `${kw} – bestilling, priser og praktisk info`;
+  } else {
+    // Informational: lead with the keyword, avoid "guide" filler
+    title = `${kw} – alt du trenger å vite`;
   }
 
   const full = `${title} | ${brand}`;
   return trimToLength(full, 60);
 }
 
-function proposeMetaDescription(page: PageSnapshot, focus: string, intent: SearchIntent): string {
-  const sentence =
-    intent === "transactional"
-      ? `Se hva ${focus.toLowerCase()} innebærer, hva du får og hvordan du går videre.`
-      : intent === "commercial investigation"
-        ? `Sammenlign ${focus.toLowerCase()}, få de viktigste vurderingspunktene og velg riktig løsning.`
-        : `Få et raskt svar på ${focus.toLowerCase()}, med forklaring, fakta og vanlige spørsmål.`;
+function proposeMetaDescription(
+  page: PageSnapshot,
+  keyword: string,
+  brand: string,
+  intent: SearchIntent,
+): string {
+  const kw = keyword.toLowerCase();
 
-  const extra = page.dateModified
-    ? " Oppdatert informasjon og tydelige neste steg på ett sted."
-    : " Innholdet bør åpne tydelig og være lett å bruke i søk og AI-svar.";
+  let desc: string;
+  if (intent === "transactional") {
+    desc = `Bestill ${kw} fra ${brand}. Se hva som er inkludert, få et uforpliktende pristilbud og ta kontakt for din neste selskapsfest eller bedriftsarrangement.`;
+  } else if (intent === "commercial investigation") {
+    desc = `Lær om ${kw} fra ${brand} – hva du får, hva det koster og hvordan det skiller seg fra alternativene. Finn riktig løsning for ditt behov.`;
+  } else {
+    const freshness = page.dateModified ? " Oppdatert informasjon." : "";
+    desc = `${brand} forklarer hva ${kw} er, hvem det passer for og hva du bør vite før du tar neste steg.${freshness} Inkluderer FAQ og praktiske tips.`;
+  }
 
-  return trimToLength(`${sentence}${extra}`, 155);
+  return trimToLength(desc, 155);
 }
 
 function proposeSchema(
