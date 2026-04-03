@@ -21,6 +21,10 @@ mkdirSync(dataDir, { recursive: true });
 
 const db = new DatabaseSync(databasePath);
 
+// WAL mode: concurrent reads don't block writes, writes don't block reads
+db.exec(`PRAGMA journal_mode=WAL`);
+db.exec(`PRAGMA synchronous=NORMAL`);
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS audit_runs (
     id TEXT PRIMARY KEY,
@@ -44,6 +48,36 @@ ensureColumn("heartbeat_at", "TEXT");
 db.exec(`
   CREATE INDEX IF NOT EXISTS idx_audit_runs_target_completed
   ON audit_runs (target_url, completed_at DESC);
+`);
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS score_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    audit_run_id TEXT NOT NULL REFERENCES audit_runs(id),
+    target_url TEXT NOT NULL,
+    recorded_at TEXT NOT NULL,
+    total_score REAL,
+    score_crawlability REAL,
+    score_rendering REAL,
+    score_answer_first REAL,
+    score_citation REAL,
+    score_schema REAL,
+    score_internal_linking REAL,
+    score_topic_clusters REAL,
+    score_zero_click REAL,
+    score_freshness REAL,
+    score_technical REAL,
+    score_openai REAL,
+    score_google REAL,
+    score_bing REAL,
+    score_perplexity REAL,
+    score_citation_provider REAL
+  );
+`);
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_score_history_target_recorded
+  ON score_history (target_url, recorded_at DESC);
 `);
 
 recoverStaleAuditRuns();
@@ -144,6 +178,13 @@ export function updateAuditProgress(id: string, progress: AuditProgress): void {
   );
 }
 
+export function updateHeartbeat(id: string): void {
+  db.prepare(`UPDATE audit_runs SET heartbeat_at = ? WHERE id = ? AND status = 'running'`).run(
+    new Date().toISOString(),
+    id,
+  );
+}
+
 export function completeAuditRun(id: string, summary: AuditRunSummary, report: AuditReport): void {
   const completedAt = new Date().toISOString();
   const progress: AuditProgress = {
@@ -179,6 +220,53 @@ export function completeAuditRun(id: string, summary: AuditRunSummary, report: A
     completedAt,
     completedAt,
     id,
+  );
+
+  writeScoreHistory(id, report.request.targetUrl, completedAt, summary);
+}
+
+function writeScoreHistory(
+  auditRunId: string,
+  targetUrl: string,
+  recordedAt: string,
+  summary: AuditRunSummary,
+): void {
+  const catScore = (id: string) =>
+    summary.categoryScores.find((c) => c.id === id)?.score ?? null;
+  const provScore = (provider: string) =>
+    summary.providerScores.find((p) => p.provider === provider)?.score ?? null;
+
+  db.prepare(
+    `
+      INSERT INTO score_history (
+        audit_run_id, target_url, recorded_at, total_score,
+        score_crawlability, score_rendering, score_answer_first,
+        score_citation, score_schema, score_internal_linking,
+        score_topic_clusters, score_zero_click, score_freshness,
+        score_technical, score_openai, score_google, score_bing,
+        score_perplexity, score_citation_provider
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  ).run(
+    auditRunId,
+    targetUrl,
+    recordedAt,
+    summary.totalScore,
+    catScore("crawlabilityIndexation"),
+    catScore("renderingAiAccessibility"),
+    catScore("answerFirstContent"),
+    catScore("citationAuthorityEntitySignals"),
+    catScore("schemaSemanticSearch"),
+    catScore("internalLinking"),
+    catScore("searchIntentTopicClusters"),
+    catScore("zeroClickAiOverviews"),
+    catScore("contentFreshness"),
+    catScore("technicalOptimization"),
+    provScore("openai"),
+    provScore("google"),
+    provScore("bing"),
+    provScore("perplexity"),
+    provScore("citation"),
   );
 }
 
@@ -368,6 +456,64 @@ export function listAuditRuns(limit = 20): AuditRunRecord[] {
       heartbeatAt: row.heartbeat_at,
     };
   });
+}
+
+export function listQueuedRuns(): Array<{ id: string; request: AuditRequestInput }> {
+  const rows = db
+    .prepare(`SELECT id, request_json FROM audit_runs WHERE status = 'queued' ORDER BY created_at ASC`)
+    .all() as Array<{ id: string; request_json: string }>;
+
+  return rows.map((row) => ({
+    id: row.id,
+    request: normalizeStoredRequest(JSON.parse(row.request_json) as Partial<AuditRequestInput>),
+  }));
+}
+
+export type ScoreHistoryEntry = {
+  auditRunId: string;
+  recordedAt: string;
+  totalScore: number | null;
+  categories: Record<string, number | null>;
+  providers: Record<string, number | null>;
+};
+
+export function getScoreHistory(targetUrl: string, days = 90): ScoreHistoryEntry[] {
+  const rows = db
+    .prepare(
+      `
+        SELECT *
+        FROM score_history
+        WHERE target_url = ?
+          AND recorded_at >= datetime('now', ? || ' days')
+        ORDER BY recorded_at ASC
+      `,
+    )
+    .all(targetUrl, `-${days}`) as Array<Record<string, unknown>>;
+
+  return rows.map((row) => ({
+    auditRunId: row.audit_run_id as string,
+    recordedAt: row.recorded_at as string,
+    totalScore: row.total_score as number | null,
+    categories: {
+      crawlabilityIndexation: row.score_crawlability as number | null,
+      renderingAiAccessibility: row.score_rendering as number | null,
+      answerFirstContent: row.score_answer_first as number | null,
+      citationAuthorityEntitySignals: row.score_citation as number | null,
+      schemaSemanticSearch: row.score_schema as number | null,
+      internalLinking: row.score_internal_linking as number | null,
+      searchIntentTopicClusters: row.score_topic_clusters as number | null,
+      zeroClickAiOverviews: row.score_zero_click as number | null,
+      contentFreshness: row.score_freshness as number | null,
+      technicalOptimization: row.score_technical as number | null,
+    },
+    providers: {
+      openai: row.score_openai as number | null,
+      google: row.score_google as number | null,
+      bing: row.score_bing as number | null,
+      perplexity: row.score_perplexity as number | null,
+      citation: row.score_citation_provider as number | null,
+    },
+  }));
 }
 
 export function findPreviousCompletedRun(targetUrl: string, excludeId: string): AuditReport | null {

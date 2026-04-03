@@ -4,7 +4,7 @@ export const DEFAULT_LOCALE = "nb-NO";
 export const DEFAULT_COUNTRY = "NO";
 export const DEFAULT_MAX_PAGES = 150;
 export const MAX_COMPETITOR_PAGES = 30;
-export const MAX_RENDER_CHECKS = 5;
+export const MAX_RENDER_CHECKS = 10;
 export const TARGET_CRAWL_CONCURRENCY = 5;
 export const COMPETITOR_CRAWL_CONCURRENCY = 3;
 
