@@ -207,10 +207,43 @@ export type PageFaqSuggestion = {
   answer: string;
 };
 
+export type SearchQueryInsight = {
+  query: string;
+  impressions: number;
+  clicks: number;
+  ctr: number;
+  position: number;
+  inContent: boolean;
+  matchedTerms: string[];
+  missingTerms: string[];
+};
+
+export type PagePerformanceMetrics = {
+  impressions: number;
+  clicks: number;
+  ctr: number;
+  position: number;
+  sessions: number;
+  conversions: number;
+  conversionRate: number;
+  bounceRate: number;
+};
+
+export type PageSearchInsights = {
+  audience: string | null;
+  audienceQualifier: string | null;
+  primaryQuery: string | null;
+  contentHighlights: string[];
+  contentGaps: string[];
+  topQueries: SearchQueryInsight[];
+  metrics: PagePerformanceMetrics | null;
+};
+
 export type PageImprovementSuggestion = {
   url: string;
   pageTitle: string;
   intent: SearchIntent;
+  searchInsights: PageSearchInsights | null;
   current: {
     metaTitle: string;
     metaDescription: string;
@@ -236,6 +269,7 @@ export type PageImprovementSuggestion = {
 
 export type PageAuditReport = {
   intent: SearchIntent;
+  searchInsights: PageSearchInsights | null;
   current: {
     url: string;
     title: string;
@@ -390,3 +424,122 @@ export type AuditReport = {
   competitiveContext: CompetitiveContext | null;
   comparison: ReportComparison;
 };
+
+export interface GoogleConnection {
+  id: number;
+  email: string;
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DomainIntegration {
+  id: number;
+  domain: string;
+  gscProperty: string | null;
+  ga4PropertyId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface GooglePropertyOption {
+  siteUrl: string;
+  permissionLevel: string;
+}
+
+export interface GoogleSyncStatus {
+  lastGscSync: string | null;
+  lastGa4Sync: string | null;
+  lastOpportunityRun: string | null;
+}
+
+export type OpportunityType =
+  | 'high-impressions-low-ctr'
+  | 'near-page-one'
+  | 'traffic-down'
+  | 'indexing-blocker'
+  | 'high-traffic-low-conversion'
+  | 'query-gap';
+
+export type OpportunityPriority = 'critical' | 'high' | 'medium' | 'low';
+
+export interface Opportunity {
+  id: number;
+  snapshotId: number;
+  domain: string;
+  targetUrl: string;
+  pageUrl: string;
+  query: string | null;
+  queryCluster: string | null;
+  type: OpportunityType;
+  priority: OpportunityPriority;
+  title: string;
+  evidence: Record<string, unknown>;
+  recommendedAction: string;
+  expectedImpact: string;
+  implementationPackId: number | null;
+  status: 'open' | 'dismissed' | 'done';
+  createdAt: string;
+}
+
+export interface OpportunitySnapshot {
+  id: number;
+  domain: string;
+  generatedAt: string;
+  opportunityCount: number;
+}
+
+export interface GscPageRow {
+  domain: string;
+  date: string;
+  page: string;
+  clicks: number;
+  impressions: number;
+  ctr: number;
+  position: number;
+}
+
+export interface GscQueryRow {
+  domain: string;
+  date: string;
+  query: string;
+  clicks: number;
+  impressions: number;
+  ctr: number;
+  position: number;
+}
+
+export interface GscPageQueryRow {
+  domain: string;
+  date: string;
+  page: string;
+  query: string;
+  clicks: number;
+  impressions: number;
+  ctr: number;
+  position: number;
+}
+
+export interface Ga4LandingPageRow {
+  domain: string;
+  date: string;
+  page: string;
+  sessions: number;
+  conversions: number;
+  bounceRate: number;
+}
+
+export interface BackgroundJob {
+  id: number;
+  type: string;
+  payload: Record<string, unknown>;
+  status: 'queued' | 'running' | 'completed' | 'failed';
+  progress: Record<string, unknown> | null;
+  errorMessage: string | null;
+  createdAt: string;
+  startedAt: string | null;
+  heartbeatAt: string | null;
+  completedAt: string | null;
+}

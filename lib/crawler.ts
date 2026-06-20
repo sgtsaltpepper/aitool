@@ -7,6 +7,8 @@ import {
   PROVIDER_AGENTS,
   TARGET_CRAWL_CONCURRENCY,
 } from "@/lib/config";
+import { selectRenderCandidates } from "@/lib/crawler/render-strategy";
+import { scoreAnswerQuality } from "@/lib/engines/answer-quality";
 import type { IndexNowStatus, PageSnapshot, ProviderId, RobotsEvaluation } from "@/lib/types";
 import { extractTextTokens, formatDate, normalizeUrl, sameHost, stripShortcodes, unique } from "@/lib/utils";
 
@@ -764,11 +766,11 @@ async function extractPageSnapshot(input: {
       errors: [],
     },
     answerFirstSignals: {
-      conciseOpening: firstParagraph.length >= 60 && firstParagraph.length <= 260,
+      conciseOpening: firstParagraph.length >= 60 && firstParagraph.length <= 350,
       hasFaq: Math.max(faqCount, schema.types.includes("FAQPage") ? 1 : 0) > 0,
       hasTable: tableCount > 0,
       hasList: listCount > 0,
-      directAnswerLikelihood: scoreDirectAnswerLikelihood(firstParagraph, h1, headings, bodyText),
+      directAnswerLikelihood: scoreAnswerQuality(firstParagraph, h1, headings, bodyText).score,
     },
   };
 }
@@ -864,28 +866,6 @@ function extractSchemaString(rawItems: unknown[], paths: string[]): string | nul
   return null;
 }
 
-function scoreDirectAnswerLikelihood(
-  firstParagraph: string,
-  h1: string,
-  headings: string[],
-  bodyText: string,
-): number {
-  let score = 0;
-  if (firstParagraph.length >= 60 && firstParagraph.length <= 260) {
-    score += 45;
-  }
-  if (/^(hva|hvordan|why|what|how|når|when|hvem|who)/i.test(h1) || headings.some((heading) => heading.endsWith("?"))) {
-    score += 20;
-  }
-  if (/(er|means|is|refererer til|defineres som)/i.test(firstParagraph)) {
-    score += 20;
-  }
-  if (bodyText.includes(":") || bodyText.includes("1.") || bodyText.includes("2.")) {
-    score += 15;
-  }
-
-  return Math.min(100, score);
-}
 
 function annotateLinkGraph(pages: PageSnapshot[]): void {
   const pageUrls = new Set(pages.map((page) => page.url));
@@ -926,14 +906,7 @@ function estimateRenderingModel(rawTextLength: number, scriptCount: number): Pag
 }
 
 async function enrichRenderingSnapshots(pages: PageSnapshot[]): Promise<void> {
-  const candidates = pages
-    .filter((page) => !page.blockedByRobots && page.contentType?.includes("text/html"))
-    .sort((a, b) => {
-      const scoreA = a.rendering.rawTextLength + a.scriptCount * -100;
-      const scoreB = b.rendering.rawTextLength + b.scriptCount * -100;
-      return scoreA - scoreB;
-    })
-    .slice(0, MAX_RENDER_CHECKS);
+  const candidates = selectRenderCandidates(pages, MAX_RENDER_CHECKS);
 
   if (!candidates.length) {
     return;

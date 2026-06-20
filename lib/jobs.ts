@@ -9,13 +9,24 @@ import {
   failAuditRun,
   findPreviousCompletedRun,
   getAuditRun,
+  listQueuedRuns,
   startAuditRun,
   updateAuditProgress,
+  updateHeartbeat,
 } from "@/lib/db";
 import type { AuditPhase, AuditProgress, AuditReport, AuditRequestInput, AuditRunRecord } from "@/lib/types";
 import { normalizeUrl } from "@/lib/utils";
 
+const HEARTBEAT_INTERVAL_MS = 2 * 60 * 1000; // 2 minutes
+
 const runningJobs = new Map<string, Promise<void>>();
+
+// On module load: re-start any jobs that were queued but never picked up
+// (e.g., server restarted between creating the DB record and starting execution).
+// We defer with setImmediate so the module finishes initializing first.
+setImmediate(() => {
+  recoverQueuedJobs();
+});
 
 export function queueAuditRun(request: AuditRequestInput): AuditRunRecord {
   const id = randomUUID();
@@ -26,13 +37,33 @@ export function queueAuditRun(request: AuditRequestInput): AuditRunRecord {
     maxPages: request.mode === "page" ? 1 : request.maxPages,
   };
   const run = createAuditRun(id, normalizedRequest);
-  const job = executeAuditRun(id, normalizedRequest);
+  scheduleJob(id, normalizedRequest);
+  return run;
+}
+
+/**
+ * Re-execute any jobs that are still in 'queued' state in the DB.
+ * Called on server startup and from the /api/queue/worker endpoint.
+ * Returns the number of jobs recovered.
+ */
+export function recoverQueuedJobs(): number {
+  const queued = listQueuedRuns();
+  let count = 0;
+  for (const { id, request } of queued) {
+    if (!runningJobs.has(id)) {
+      scheduleJob(id, request);
+      count++;
+    }
+  }
+  return count;
+}
+
+function scheduleJob(id: string, request: AuditRequestInput): void {
+  const job = executeAuditRun(id, request);
   runningJobs.set(id, job);
   void job.finally(() => {
     runningJobs.delete(id);
   });
-
-  return run;
 }
 
 export function getRunningJob(id: string): Promise<void> | undefined {
@@ -42,6 +73,12 @@ export function getRunningJob(id: string): Promise<void> | undefined {
 async function executeAuditRun(id: string, request: AuditRequestInput): Promise<void> {
   startAuditRun(id);
   const startedAt = Date.now();
+
+  // Keep the DB heartbeat alive every 2 minutes so stale-job detection doesn't
+  // mark a legitimately long crawl as failed.
+  const heartbeatTimer = setInterval(() => {
+    updateHeartbeat(id);
+  }, HEARTBEAT_INTERVAL_MS);
   const updateProgress = (partial: Partial<AuditProgress> & Pick<AuditProgress, "phase" | "message">) => {
     const run = getAuditRun(id);
     if (!run) {
@@ -157,6 +194,8 @@ async function executeAuditRun(id: string, request: AuditRequestInput): Promise<
     completeAuditRun(id, toSummary(report), report);
   } catch (error) {
     failAuditRun(id, error instanceof Error ? error.message : "Ukjent feil under analyse");
+  } finally {
+    clearInterval(heartbeatTimer);
   }
 }
 

@@ -3,12 +3,14 @@ import Link from "next/link";
 import { AuditForm } from "@/components/AuditForm";
 import { ScorePill, StatusPill } from "@/components/Badges";
 import { DEFAULT_COUNTRY, DEFAULT_LOCALE, DEFAULT_MAX_PAGES } from "@/lib/config";
-import { listAuditRuns } from "@/lib/db";
+import { listAuditRuns, getGoogleConnection, countOpenOpportunities } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
 export default function HomePage() {
   const runs = listAuditRuns(12);
+  const googleConnection = getGoogleConnection();
+  const openOpportunities = countOpenOpportunities();
 
   return (
     <>
@@ -38,6 +40,16 @@ export default function HomePage() {
               Gå til sideanalyse
             </Link>
           </div>
+      <div className="hero-links" style={{ marginTop: "1rem", display: "flex", gap: "0.75rem", flexWrap: "wrap" }}>
+        <Link href="/integrations" className="secondary-button">
+          {googleConnection ? `✓ Google Connected (${googleConnection.email})` : "Connect Google"}
+        </Link>
+        {openOpportunities > 0 && (
+          <Link href="/opportunities" className="secondary-button">
+            {openOpportunities} open opportunities
+          </Link>
+        )}
+      </div>
           <AuditForm
             defaultLocale={DEFAULT_LOCALE}
             defaultCountry={DEFAULT_COUNTRY}
