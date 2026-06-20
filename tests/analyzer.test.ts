@@ -1,6 +1,9 @@
+import { randomUUID } from "node:crypto";
+
 import { describe, expect, it } from "vitest";
 
 import { buildAuditReport } from "@/lib/analyzer";
+import { upsertGa4LandingPageRow, upsertGscPageQueryRow, upsertGscPageRow } from "@/lib/db";
 import type { AuditRequestInput, PageSnapshot } from "@/lib/types";
 
 const request: AuditRequestInput = {
@@ -448,5 +451,86 @@ describe("buildAuditReport", () => {
     });
 
     expect(report.implementationPacks.length).toBeLessThanOrEqual(5);
+  });
+
+  it("bruker GSC og GA4 til å spisse metadata og innholdsforslag", () => {
+    const domain = `test-${randomUUID().slice(0, 8)}.no`;
+    const pageUrl = `https://${domain}/julebord`;
+    const page = createPage({
+      url: pageUrl,
+      path: "/julebord",
+      title: "Julebord | Eksempel",
+      metaDescription: "Kort beskrivelse.",
+      h1: "Julebord for bedrifter",
+      headings: ["Meny og lokaler", "Priser og booking"],
+      firstParagraph: "Vi hjelper bedrifter med å planlegge julebord med meny, lokaler og enkel booking.",
+      bodyText: "Vi hjelper bedrifter med å planlegge julebord med meny, lokaler og enkel booking. Her finner du priser, kapasitet og hvordan dere bestiller.",
+      hasContactLink: true,
+      answerFirstSignals: {
+        conciseOpening: true,
+        hasFaq: false,
+        hasTable: false,
+        hasList: true,
+        directAnswerLikelihood: 75,
+      },
+    });
+
+    upsertGscPageRow({
+      domain,
+      date: "2026-06-15",
+      page: pageUrl,
+      clicks: 20,
+      impressions: 1200,
+      ctr: 0.016,
+      position: 7.2,
+    });
+    upsertGscPageQueryRow({
+      domain,
+      date: "2026-06-15",
+      page: pageUrl,
+      query: "julebord for bedrifter",
+      clicks: 12,
+      impressions: 700,
+      ctr: 0.017,
+      position: 6.8,
+    });
+    upsertGscPageQueryRow({
+      domain,
+      date: "2026-06-15",
+      page: pageUrl,
+      query: "julebord priser",
+      clicks: 8,
+      impressions: 500,
+      ctr: 0.016,
+      position: 7.5,
+    });
+    upsertGa4LandingPageRow({
+      domain,
+      date: "2026-06-15",
+      page: pageUrl,
+      sessions: 240,
+      conversions: 1,
+      bounceRate: 0.61,
+    });
+
+    const report = buildAuditReport({
+      runId: "search-insight",
+      request: {
+        ...request,
+        mode: "page",
+        targetUrl: pageUrl,
+        maxPages: 1,
+      },
+      targetPages: [page],
+      competitorPagesByDomain: {},
+      previousReport: null,
+      indexNowStatus: "unknown",
+    });
+
+    expect(report.pageReport?.searchInsights?.audience).toContain("bedrifter");
+    expect(report.pageReport?.proposed.metaTitle).toContain("Julebord");
+    expect(report.pageReport?.proposed.metaDescription).toContain("bedrifter");
+    expect(report.pageReport?.proposed.metaDescription).toMatch(/meny|priser|booking/i);
+    expect(report.pageSuggestions[0]?.proposed.contentNotes.join(" ")).toMatch(/CTA|pris|søket/i);
   });
 });

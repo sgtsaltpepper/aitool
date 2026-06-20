@@ -123,6 +123,24 @@ function buildSuggestionsMarkdown(report: NonNullable<ReturnType<typeof getAudit
     lines.push(`- Foreslått metabeskrivelse: ${suggestion.proposed.metaDescription}`);
     lines.push("");
 
+    if (suggestion.searchInsights) {
+      lines.push("### Søkeinnsikt bak metadataforslaget");
+      lines.push("");
+      if (suggestion.searchInsights.audience) {
+        lines.push(`- Publikum: ${suggestion.searchInsights.audience}`);
+      }
+      if (suggestion.searchInsights.topQueries.length) {
+        lines.push(`- Viktige søk: ${suggestion.searchInsights.topQueries.map((item) => item.query).join(", ")}`);
+      }
+      if (suggestion.searchInsights.contentHighlights.length) {
+        lines.push(`- Gjenkjent innhold på siden: ${suggestion.searchInsights.contentHighlights.join(", ")}`);
+      }
+      if (suggestion.searchInsights.contentGaps.length) {
+        suggestion.searchInsights.contentGaps.forEach((gap) => lines.push(`- ${gap}`));
+      }
+      lines.push("");
+    }
+
     lines.push("### Foreslått JSON-LD");
     lines.push("");
     lines.push("```json");
@@ -222,6 +240,23 @@ function buildPageAuditMarkdown(report: NonNullable<ReturnType<typeof getAuditRe
   lines.push(`- Nåværende metabeskrivelse: ${pageReport.current.metaDescription || "Ingen"}`);
   lines.push(`- Foreslått metabeskrivelse: ${pageReport.proposed.metaDescription}`);
   lines.push("");
+  if (pageReport.searchInsights) {
+    lines.push("## Søkeinnsikt bak metadataforslaget");
+    lines.push("");
+    if (pageReport.searchInsights.audience) {
+      lines.push(`- Publikum: ${pageReport.searchInsights.audience}`);
+    }
+    if (pageReport.searchInsights.topQueries.length) {
+      lines.push(`- Viktige søk: ${pageReport.searchInsights.topQueries.map((item) => item.query).join(", ")}`);
+    }
+    if (pageReport.searchInsights.contentHighlights.length) {
+      lines.push(`- Gjenkjent innhold på siden: ${pageReport.searchInsights.contentHighlights.join(", ")}`);
+    }
+    if (pageReport.searchInsights.contentGaps.length) {
+      pageReport.searchInsights.contentGaps.forEach((gap) => lines.push(`- ${gap}`));
+    }
+    lines.push("");
+  }
   lines.push("## Foreslått JSON-LD");
   lines.push("");
   lines.push(`- Schema-type: ${pageReport.proposed.schemaType}`);

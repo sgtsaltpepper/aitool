@@ -3,8 +3,9 @@ import { notFound } from "next/navigation";
 
 import { AutoRefresh } from "@/components/AutoRefresh";
 import { ScorePill, StatusPill } from "@/components/Badges";
+import { SyncButton } from "@/app/integrations/SyncButton";
 import { CATEGORY_LABELS, PROVIDER_LABELS } from "@/lib/config";
-import { getAuditReport, getAuditRun, listAuditRuns } from "@/lib/db";
+import { getAuditReport, getAuditRun, getGoogleConnection, listAuditRuns, listDomainIntegrations } from "@/lib/db";
 import type { AuditReport, ImplementationPack, Issue, Recommendation } from "@/lib/types";
 import { humanPath, readableExcerpt, summarizeList } from "@/lib/utils";
 
@@ -26,9 +27,30 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
   const history = listAuditRuns(20).filter(
     (entry) => entry.targetUrl === run.targetUrl && entry.request.mode === run.request.mode,
   );
+  const googleConnection = getGoogleConnection();
+  const domain = (() => { try { return new URL(run.targetUrl).hostname; } catch { return run.targetUrl; } })();
+  const domainIntegration = listDomainIntegrations().find((d) => d.domain === domain) ?? null;
 
   return (
     <>
+      {/* Google integration status */}
+      {googleConnection && domainIntegration && (
+        <div style={{ background: "#f0fdf4", border: "1px solid #bbf7d0", borderRadius: "8px", padding: "12px 16px", marginBottom: "1rem", display: "flex", alignItems: "center", gap: "12px" }}>
+          <span style={{ color: "#16a34a" }}>✓</span>
+          <span style={{ fontSize: "14px", color: "#166534" }}>
+            GSC & GA4 connected for <strong>{domain}</strong>.{" "}
+            <Link href="/opportunities" style={{ color: "#15803d" }}>View opportunities →</Link>
+          </span>
+        </div>
+      )}
+      {!googleConnection && (
+        <div style={{ background: "#fafafa", border: "1px solid #e5e7eb", borderRadius: "8px", padding: "12px 16px", marginBottom: "1rem", display: "flex", alignItems: "center", gap: "12px" }}>
+          <span style={{ fontSize: "14px", color: "#6b7280" }}>
+            Connect Google Search Console to unlock opportunity tracking.{" "}
+            <Link href="/integrations" style={{ color: "#2563eb" }}>Set up integrations →</Link>
+          </span>
+        </div>
+      )}
       <AutoRefresh enabled={run.status === "queued" || run.status === "running"} />
 
       <div className="report-header">
@@ -46,6 +68,15 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
         <div className="button-row">
           {run.summary ? <ScorePill score={run.summary.totalScore} /> : null}
           <StatusPill status={run.status} />
+          <Link href="/integrations" className="secondary-button">
+            Domener og integrasjoner
+          </Link>
+          {domainIntegration ? (
+            <Link href={`/opportunities${domain ? `?domain=${encodeURIComponent(domain)}` : ""}`} className="secondary-button">
+              Opportunities
+            </Link>
+          ) : null}
+          {googleConnection && domainIntegration ? <SyncButton /> : null}
           {report ? (
             <a href={`/api/audits/${run.id}/suggestions`} className="secondary-button" download>
               Eksporter forslag (.md)
@@ -231,7 +262,7 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
           <section className="report-grid">
             <div className="section-header">
               <h2>Bedre metadata</h2>
-              <p>Før/etter for metatittel og metabeskrivelse.</p>
+              <p>Før/etter for metatittel og metabeskrivelse, basert på sideinnhold og signaler fra GSC/GA4 når de finnes.</p>
             </div>
             <div className="recommendations-grid">
               <article className="recommendation">
@@ -259,6 +290,37 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
                 </ul>
               </article>
             </div>
+            {report.pageReport.searchInsights ? (
+              <article className="recommendation">
+                <h3>Søkeinnsikt bak forslaget</h3>
+                <ul className="list">
+                  {report.pageReport.searchInsights.audience ? (
+                    <li>
+                      <strong>Publikum</strong>
+                      <p>{report.pageReport.searchInsights.audience}</p>
+                    </li>
+                  ) : null}
+                  {report.pageReport.searchInsights.contentHighlights.length ? (
+                    <li>
+                      <strong>Innhold som er gjenkjent på siden</strong>
+                      <p>{report.pageReport.searchInsights.contentHighlights.join(", ")}</p>
+                    </li>
+                  ) : null}
+                  {report.pageReport.searchInsights.topQueries.length ? (
+                    <li>
+                      <strong>Topp søk</strong>
+                      <p>{report.pageReport.searchInsights.topQueries.map((item) => item.query).join(", ")}</p>
+                    </li>
+                  ) : null}
+                  {report.pageReport.searchInsights.contentGaps.length ? (
+                    <li>
+                      <strong>Anbefalte innholdsendringer</strong>
+                      <p>{report.pageReport.searchInsights.contentGaps.join(" ")}</p>
+                    </li>
+                  ) : null}
+                </ul>
+              </article>
+            ) : null}
           </section>
 
           <section className="report-grid">
@@ -872,6 +934,12 @@ function PageSuggestionCard({ suggestion }: { suggestion: AuditReport["pageSugge
       </div>
       <p>{suggestion.proposed.contentLead}</p>
       <ul className="list">
+        {suggestion.searchInsights?.audience ? (
+          <li>
+            <strong>Målgruppe i søket</strong>
+            <p>{suggestion.searchInsights.audience}</p>
+          </li>
+        ) : null}
         <li>
           <strong>Foreslått struktur</strong>
           <p>{suggestion.proposed.structure.join(" -> ")}</p>

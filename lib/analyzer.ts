@@ -1,4 +1,10 @@
 import { CATEGORY_LABELS, CATEGORY_WEIGHTS, PROVIDER_LABELS } from "@/lib/config";
+import { getGa4MetricsForPage, getGscMetricsForPage, getTopQueriesForPage } from "@/lib/db";
+import {
+  buildAudienceAwareDescriptions,
+  buildAudienceAwareTitles,
+  buildPageSearchInsights,
+} from "@/lib/meta-suggestions";
 import type {
   AuditReport,
   AuditRequestInput,
@@ -13,6 +19,7 @@ import type {
   PageAuditReport,
   PageFaqSuggestion,
   PageImprovementSuggestion,
+  PagePerformanceMetrics,
   PageSectionSuggestion,
   PageSnapshot,
   Priority,
@@ -920,24 +927,59 @@ function buildPageSuggestions(pages: PageSnapshot[]): PageImprovementSuggestion[
       const pageTitle = page.h1 || page.title || humanPath(page.url);
       const keyword = extractKeyword(page);
       const brand = extractBrandName(page);
+      const domain = new URL(page.url).hostname.replace(/^www\./, "");
+      const queries = getTopQueriesForPage(domain, page.url, 28, 5);
+      const gscMetrics = getGscMetricsForPage(domain, page.url, 28);
+      const ga4Metrics = getGa4MetricsForPage(domain, page.url, 28);
+      const performanceMetrics: PagePerformanceMetrics | null = gscMetrics || ga4Metrics
+        ? {
+            impressions: gscMetrics?.impressions ?? 0,
+            clicks: gscMetrics?.clicks ?? 0,
+            ctr: gscMetrics?.ctr ?? 0,
+            position: gscMetrics?.position ?? 0,
+            sessions: ga4Metrics?.sessions ?? 0,
+            conversions: ga4Metrics?.conversions ?? 0,
+            conversionRate: ga4Metrics?.sessions ? ga4Metrics.conversions / ga4Metrics.sessions : 0,
+            bounceRate: ga4Metrics?.bounceRate ?? 0,
+          }
+        : null;
+      const searchInsights = buildPageSearchInsights({
+        page,
+        domain,
+        intent,
+        keyword,
+        brand,
+        queries,
+        metrics: performanceMetrics,
+      });
       // Keep focus for backward-compat with functions not yet updated
       const focus = keyword;
       const structure = proposeStructure(page, intent);
-      const metaTitle = proposeMetaTitle(page, keyword, brand);
-      const metaDescription = proposeMetaDescription(page, keyword, brand, intent);
+      const metaTitle = proposeMetaTitle(page, keyword, brand, intent, searchInsights);
+      const metaDescription = proposeMetaDescription(page, keyword, brand, intent, searchInsights);
       const contentLead = proposeContentLead(page, keyword, brand, intent);
-      const contentNotes = proposeContentNotes(page, intent, keyword, brand, metaTitle, metaDescription, contentLead);
+      const contentNotes = proposeContentNotes(
+        page,
+        intent,
+        keyword,
+        brand,
+        metaTitle,
+        metaDescription,
+        contentLead,
+        searchInsights,
+      );
       const sections = proposeSections(page, keyword, brand, intent);
       const faq = proposeFaq(keyword, brand, intent);
       const cta = proposeCta(keyword, intent);
       const schema = proposeSchema(page, focus, intent, metaDescription);
       const proposedH1 = proposeH1(page, keyword, brand, intent);
-      const rationale = buildSuggestionRationale(page);
+      const rationale = buildSuggestionRationale(page, searchInsights);
 
       return {
         url: page.url,
         pageTitle,
         intent,
+        searchInsights,
         current: {
           metaTitle: page.title,
           metaDescription: page.metaDescription,
@@ -1103,6 +1145,9 @@ function classifyIntent(page: PageSnapshot): SearchIntent {
  * the brand name (left side) and threw away the service keyword (right side).
  */
 function extractKeyword(page: PageSnapshot): string {
+  const h1 = (page.h1 || "").trim();
+  const title = (page.title || "").trim();
+
   // 1. URL path: /tryllekunstner, /magic-shows, /bedriftsarrangement
   const pathSegments = page.path
     .split("/")
@@ -1112,12 +1157,19 @@ function extractKeyword(page: PageSnapshot): string {
   if (pathSegments.length > 0) {
     const last = pathSegments[pathSegments.length - 1]!.replace(/[-_]/g, " ").replace(/\.\w+$/, "");
     if (last.length > 3 && last.length < 55) {
-      return last.charAt(0).toUpperCase() + last.slice(1);
+      const slugCandidate = last.charAt(0).toUpperCase() + last.slice(1);
+      const visibleCandidates = [h1, title].filter(Boolean).map((value) => value.replace(/\s+[|\-–:].*$/, "").trim());
+      const normalizedSlug = extractTextTokens(slugCandidate).join(" ");
+      const visibleMatch = visibleCandidates.find((candidate) => {
+        const normalizedCandidate = extractTextTokens(candidate).join(" ");
+        return normalizedCandidate === normalizedSlug || normalizedCandidate.includes(normalizedSlug);
+      });
+      if (visibleMatch) {
+        return visibleMatch;
+      }
+      return slugCandidate;
     }
   }
-
-  const h1 = (page.h1 || "").trim();
-  const title = (page.title || "").trim();
 
   // 2. RIGHT side of H1 separator (brand – service → service is the keyword)
   const h1Right = h1.match(/\s*[-–|]\s*(.{4,55})$/);
@@ -1237,6 +1289,7 @@ function proposeContentNotes(
   proposedTitle: string,
   proposedDescription: string,
   proposedLead: string,
+  searchInsights: PageImprovementSuggestion["searchInsights"],
 ): string[] {
   const notes: string[] = [];
   const kw = keyword.toLowerCase();
@@ -1264,6 +1317,9 @@ function proposeContentNotes(
   }
   if (!page.dateModified) {
     notes.push("Vis «Sist oppdatert»-dato i innholdsmal og speil den i Article-schema.");
+  }
+  if (searchInsights?.contentGaps.length) {
+    notes.push(...searchInsights.contentGaps);
   }
 
   return unique(notes).slice(0, 5);
@@ -1358,22 +1414,27 @@ function proposeCta(keyword: string, intent: SearchIntent): string {
   return `Har du spørsmål om ${kw}? Ta kontakt – vi svarer raskt.`;
 }
 
-function proposeMetaTitle(page: PageSnapshot, keyword: string, brand: string): string {
-  const intent = classifyIntent(page);
-  const kw = keyword;
+function proposeMetaTitle(
+  page: PageSnapshot,
+  keyword: string,
+  brand: string,
+  intent: SearchIntent,
+  searchInsights: PageImprovementSuggestion["searchInsights"],
+): string {
+  const suggestion = buildAudienceAwareTitles(
+    {
+      page,
+      domain: new URL(page.url).hostname.replace(/^www\./, ""),
+      intent,
+      keyword,
+      brand,
+      queries: searchInsights?.topQueries ?? [],
+      metrics: searchInsights?.metrics ?? null,
+    },
+    searchInsights,
+  )[0];
 
-  let title: string;
-  if (intent === "commercial investigation") {
-    title = `${kw} – sammenligning, fordeler og hva du bør vite`;
-  } else if (intent === "transactional") {
-    title = `${kw} – bestilling, priser og praktisk info`;
-  } else {
-    // Informational: lead with the keyword, avoid "guide" filler
-    title = `${kw} – alt du trenger å vite`;
-  }
-
-  const full = `${title} | ${brand}`;
-  return trimToLength(full, 60);
+  return suggestion ?? trimToLength(`${keyword} | ${brand}`, 60);
 }
 
 function proposeMetaDescription(
@@ -1381,20 +1442,22 @@ function proposeMetaDescription(
   keyword: string,
   brand: string,
   intent: SearchIntent,
+  searchInsights: PageImprovementSuggestion["searchInsights"],
 ): string {
-  const kw = keyword.toLowerCase();
+  const suggestion = buildAudienceAwareDescriptions(
+    {
+      page,
+      domain: new URL(page.url).hostname.replace(/^www\./, ""),
+      intent,
+      keyword,
+      brand,
+      queries: searchInsights?.topQueries ?? [],
+      metrics: searchInsights?.metrics ?? null,
+    },
+    searchInsights,
+  )[0];
 
-  let desc: string;
-  if (intent === "transactional") {
-    desc = `Bestill ${kw} fra ${brand}. Se hva som er inkludert, få et uforpliktende pristilbud og ta kontakt for din neste selskapsfest eller bedriftsarrangement.`;
-  } else if (intent === "commercial investigation") {
-    desc = `Lær om ${kw} fra ${brand} – hva du får, hva det koster og hvordan det skiller seg fra alternativene. Finn riktig løsning for ditt behov.`;
-  } else {
-    const freshness = page.dateModified ? " Oppdatert informasjon." : "";
-    desc = `${brand} forklarer hva ${kw} er, hvem det passer for og hva du bør vite før du tar neste steg.${freshness} Inkluderer FAQ og praktiske tips.`;
-  }
-
-  return trimToLength(desc, 155);
+  return suggestion ?? trimToLength(`${brand} forklarer ${keyword.toLowerCase()} og hva brukeren bør gjøre videre.`, 155);
 }
 
 function proposeSchema(
@@ -1472,7 +1535,10 @@ function pickPrimarySchemaType(page: PageSnapshot, intent: SearchIntent): string
   return "WebPage";
 }
 
-function buildSuggestionRationale(page: PageSnapshot): string[] {
+function buildSuggestionRationale(
+  page: PageSnapshot,
+  searchInsights: PageImprovementSuggestion["searchInsights"],
+): string[] {
   const rationale: string[] = [];
 
   if (page.title.length < 35 || page.title.length > 60) {
@@ -1488,6 +1554,15 @@ function buildSuggestionRationale(page: PageSnapshot): string[] {
   }
   if (page.answerFirstSignals.directAnswerLikelihood < 70) {
     rationale.push("Åpningen bør svare raskere på hovedspørsmålet.");
+  }
+  if (searchInsights?.topQueries.some((item) => !item.inContent && item.impressions >= 20)) {
+    rationale.push("Søkeinnsikten viser at siden får visninger på temaer som ikke er tydelig nok dekket i innholdet.");
+  }
+  if (searchInsights?.metrics && searchInsights.metrics.impressions >= 300 && searchInsights.metrics.ctr < 0.03) {
+    rationale.push("GSC-data peker på lav CTR, så metadata bør bli mer publikumsrettet og bedre speile innholdet på siden.");
+  }
+  if (searchInsights?.metrics && searchInsights.metrics.sessions >= 100 && searchInsights.metrics.conversionRate < 0.01) {
+    rationale.push("GA4-data viser trafikk uten nok handling, så siden trenger tydeligere verdi og neste steg.");
   }
 
   if (!rationale.length) {
@@ -1528,6 +1603,7 @@ function buildPageReport(
 
   return {
     intent: suggestion.intent,
+    searchInsights: suggestion.searchInsights,
     current: {
       url: page.url,
       title: page.title,
