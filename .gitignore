@@ -5,3 +5,7 @@ node_modules
 npm-debug.log*
 playwright-report
 test-results
+.env.local
+*.db
+tsconfig.tsbuildinfo
+.claude/

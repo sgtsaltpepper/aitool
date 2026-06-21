@@ -4,9 +4,15 @@ import { describe, expect, it } from "vitest";
 
 import {
   completeAuditRun,
+  createAuditChangeEvent,
+  createOpportunitySnapshot,
   createAuditRun,
   getAuditReport,
   getAuditRun,
+  listAuditChangeEvents,
+  listOpportunities,
+  listOpportunitySnapshots,
+  insertOpportunityItem,
   recoverStaleAuditRuns,
   startAuditRun,
   updateAuditProgress,
@@ -181,5 +187,309 @@ describe("db audit lifecycle", () => {
 
     expect(stored?.pages[0]?.bodyText.length).toBeLessThan(500);
     expect(stored?.pages[0]?.rendering.extractedTextPreview.length).toBeLessThan(300);
+  });
+
+  it("logger endringer og bekrefter dem mot en nyere audit", () => {
+    const firstId = `change-base-${randomUUID()}`;
+    const secondId = `change-followup-${randomUUID()}`;
+    const pageRequest: AuditRequestInput = {
+      mode: "page",
+      targetUrl: "https://example.no/tjeneste",
+      locale: "nb-NO",
+      country: "NO",
+      competitorUrls: [],
+      maxPages: 1,
+    };
+
+    createAuditRun(firstId, pageRequest);
+
+    const baseReport: AuditReport = {
+      runId: firstId,
+      request: pageRequest,
+      generatedAt: new Date().toISOString(),
+      totalScore: 62,
+      summary: "Base",
+      indexNowStatus: "unknown",
+      categoryScores: [],
+      providerScores: [],
+      issues: [],
+      recommendations: [],
+      pages: [
+        {
+          url: pageRequest.targetUrl,
+          path: "/tjeneste",
+          discoveredFrom: "seed",
+          statusCode: 200,
+          contentType: "text/html",
+          canonicalUrl: pageRequest.targetUrl,
+          robotsMeta: [],
+          xRobotsTag: [],
+          xIndexNowKey: null,
+          title: "Gammel tittel",
+          metaDescription: "Gammel beskrivelse.",
+          h1: "Gammel H1",
+          headings: [],
+          firstParagraph: "Gammel åpning",
+          bodyText: "Gammel åpning",
+          rawHtmlBytes: 1000,
+          scriptCount: 0,
+          wordCount: 150,
+          paragraphCount: 2,
+          listCount: 0,
+          tableCount: 0,
+          faqCount: 0,
+          definitionLikeBlocks: 0,
+          internalLinks: [],
+          externalLinks: [],
+          brokenInternalLinks: [],
+          inboundLinks: 0,
+          clickDepth: 1,
+          schema: { types: [], itemCount: 0, matchesVisibleContent: true, rawItems: [] },
+          imagesWithoutAlt: 0,
+          imageCount: 0,
+          hasTranscriptSignals: false,
+          author: null,
+          publisher: null,
+          hasAboutLink: false,
+          hasContactLink: true,
+          datePublished: null,
+          dateModified: null,
+          snippetDirectives: { noSnippet: false, maxSnippet: null, dataNoSnippet: false },
+          robotsEvaluation: { generalAllowed: true, blockedProviders: [], blockedAgents: [] },
+          blockedByRobots: false,
+          noindex: false,
+          rendering: {
+            rawTextLength: 1000,
+            renderedTextLength: 1000,
+            renderDeltaRatio: 1,
+            renderingModel: "ssr",
+            extractedTextPreview: "preview",
+            errors: [],
+          },
+          answerFirstSignals: {
+            conciseOpening: true,
+            hasFaq: false,
+            hasTable: false,
+            hasList: false,
+            directAnswerLikelihood: 60,
+          },
+        },
+      ],
+      pageSuggestions: [],
+      pageReport: {
+        intent: { primary: "transactional" },
+        searchInsights: null,
+        metadataAgent: null,
+        current: {
+          url: pageRequest.targetUrl,
+          title: "Gammel tittel",
+          metaTitle: "Gammel tittel",
+          metaDescription: "Gammel beskrivelse.",
+          h1: "Gammel H1",
+          opening: "Gammel åpning",
+          schemaTypes: [],
+          renderingModel: "ssr",
+          answerScore: 60,
+        },
+        proposed: {
+          metaTitle: "Ny tittel",
+          metaDescription: "Ny beskrivelse med klar verdi.",
+          h1: "Ny H1",
+          opening: "Ny åpning",
+          structure: [],
+          sections: [],
+          faq: [],
+          cta: "Kontakt oss",
+          schemaType: "Service",
+          jsonLd: "{}",
+        },
+        changeSummary: [],
+        priorityActions: [],
+      },
+      implementationPacks: [],
+      topicClusters: [],
+      competitiveContext: null,
+      comparison: { previousRunId: null, totalScoreDelta: null, categoryDeltas: [] },
+    };
+
+    completeAuditRun(firstId, {
+      mode: "page",
+      totalScore: 62,
+      categoryScores: [],
+      providerScores: [],
+      totalPages: 1,
+      issueCount: 0,
+      targetUrl: pageRequest.targetUrl,
+    }, baseReport);
+
+    const appliedAt = new Date("2026-02-01T10:00:00.000Z").toISOString();
+    createAuditChangeEvent({
+      id: `change-${randomUUID()}`,
+      auditRunId: firstId,
+      targetUrl: pageRequest.targetUrl,
+      mode: "page",
+      pageUrl: pageRequest.targetUrl,
+      changeType: "page-report",
+      changeTitle: "Sideforslag",
+      changeSummary: "Ny metadata og åpning publisert",
+      baseline: {
+        url: pageRequest.targetUrl,
+        h1: "Gammel H1",
+        opening: "Gammel åpning",
+        metaTitle: "Gammel tittel",
+        metaDescription: "Gammel beskrivelse.",
+        schemaTypes: [],
+      },
+      expected: {
+        url: pageRequest.targetUrl,
+        h1: "Ny H1",
+        opening: "Ny åpning",
+        metaTitle: "Ny tittel",
+        metaDescription: "Ny beskrivelse med klar verdi.",
+        schemaTypes: ["Service"],
+      },
+      notes: "Publisert i CMS",
+      appliedAt,
+    });
+
+    createAuditRun(secondId, pageRequest);
+    const followUpReport: AuditReport = {
+      ...baseReport,
+      runId: secondId,
+      generatedAt: new Date("2026-02-03T10:00:00.000Z").toISOString(),
+      totalScore: 74,
+      pages: [
+        {
+          ...baseReport.pages[0]!,
+          title: "Ny tittel",
+          metaDescription: "Ny beskrivelse med klar verdi.",
+          h1: "Ny H1",
+          firstParagraph: "Ny åpning",
+          schema: { types: ["Service"], itemCount: 1, matchesVisibleContent: true, rawItems: [] },
+        },
+      ],
+      pageReport: {
+        ...baseReport.pageReport!,
+        current: {
+          ...baseReport.pageReport!.current,
+          metaTitle: "Ny tittel",
+          metaDescription: "Ny beskrivelse med klar verdi.",
+          h1: "Ny H1",
+          opening: "Ny åpning",
+          schemaTypes: ["Service"],
+        },
+      },
+    };
+
+    completeAuditRun(secondId, {
+      mode: "page",
+      totalScore: 74,
+      categoryScores: [],
+      providerScores: [],
+      totalPages: 1,
+      issueCount: 0,
+      targetUrl: pageRequest.targetUrl,
+    }, followUpReport);
+
+    const entries = listAuditChangeEvents(pageRequest.targetUrl, "page");
+
+    expect(entries[0]?.evaluation.status).toBe("confirmed");
+    expect(entries[0]?.evaluation.matchedFields).toContain("metaDescription");
+    expect(entries[0]?.evaluation.scoreDelta).toBe(12);
+  });
+
+  it("viser bare nyeste opportunity-snapshot i feeden, men beholder historikken", () => {
+    const domain = `snapshot-test-${randomUUID()}`;
+    const firstSnapshot = createOpportunitySnapshot(domain, 1);
+    insertOpportunityItem({
+      snapshotId: firstSnapshot,
+      sortScore: 1200,
+      domain,
+      targetUrl: `https://${domain}.no`,
+      pageUrl: `https://${domain}.no/test`,
+      query: null,
+      queryCluster: null,
+      type: "high-impressions-low-ctr",
+      priority: "high",
+      title: "Gammelt snapshot",
+      evidence: {},
+      recommendedAction: "Gammelt tiltak",
+      expectedImpact: "Gammel effekt",
+      implementationPackId: null,
+      status: "open",
+    });
+
+    const secondSnapshot = createOpportunitySnapshot(domain, 1);
+    insertOpportunityItem({
+      snapshotId: secondSnapshot,
+      sortScore: 5200,
+      domain,
+      targetUrl: `https://${domain}.no`,
+      pageUrl: `https://${domain}.no/test`,
+      query: null,
+      queryCluster: null,
+      type: "high-impressions-low-ctr",
+      priority: "critical",
+      title: "Nytt snapshot",
+      evidence: {},
+      recommendedAction: "Nytt tiltak",
+      expectedImpact: "Ny effekt",
+      implementationPackId: null,
+      status: "open",
+    });
+
+    const feed = listOpportunities({ domain, status: "open", limit: 20 });
+    const history = listOpportunitySnapshots({ domain, limit: 10 });
+
+    expect(feed.map((item) => item.title)).toContain("Nytt snapshot");
+    expect(feed.map((item) => item.title)).not.toContain("Gammelt snapshot");
+    expect(history.map((item) => item.id)).toContain(firstSnapshot);
+    expect(history.map((item) => item.id)).toContain(secondSnapshot);
+  });
+
+  it("sorterer feeden etter sortScore før createdAt", () => {
+    const domain = `sortscore-test-${randomUUID()}`;
+    const snapshotId = createOpportunitySnapshot(domain, 2);
+
+    insertOpportunityItem({
+      snapshotId,
+      sortScore: 1800,
+      domain,
+      targetUrl: `https://${domain}.no`,
+      pageUrl: `https://${domain}.no/near-page-one`,
+      query: null,
+      queryCluster: null,
+      type: "near-page-one",
+      priority: "critical",
+      title: "Kritisk men lavere score",
+      evidence: {},
+      recommendedAction: "Tiltak A",
+      expectedImpact: "Effekt A",
+      implementationPackId: null,
+      status: "open",
+    });
+
+    insertOpportunityItem({
+      snapshotId,
+      sortScore: 5300,
+      domain,
+      targetUrl: `https://${domain}.no`,
+      pageUrl: `https://${domain}.no/cro`,
+      query: null,
+      queryCluster: null,
+      type: "high-traffic-low-conversion",
+      priority: "high",
+      title: "Høyere sortScore",
+      evidence: {},
+      recommendedAction: "Tiltak B",
+      expectedImpact: "Effekt B",
+      implementationPackId: null,
+      status: "open",
+    });
+
+    const feed = listOpportunities({ domain, status: "open", limit: 20 });
+
+    expect(feed[0]?.title).toBe("Høyere sortScore");
+    expect(feed[1]?.title).toBe("Kritisk men lavere score");
   });
 });
