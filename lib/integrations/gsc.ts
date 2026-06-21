@@ -14,6 +14,10 @@ function dateStr(daysAgo: number): string {
   return d.toISOString().slice(0, 10);
 }
 
+export function rowDateKey(value: string | undefined): string {
+  return value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : dateStr(0);
+}
+
 export async function syncGscData(
   domain: string,
   siteUrl: string,
@@ -37,18 +41,19 @@ export async function syncGscData(
         requestBody: {
           startDate,
           endDate,
-          dimensions: [dimension],
+          dimensions: ["date", dimension],
           rowLimit,
           startRow,
         },
       });
       const rows = data.rows ?? [];
       for (const row of rows) {
-        const key = row.keys?.[0] ?? "";
+        const date = rowDateKey(row.keys?.[0]);
+        const key = row.keys?.[1] ?? "";
         if (dimension === "page") {
           upsertGscPageRow({
             domain,
-            date: endDate,
+            date,
             page: key,
             clicks: row.clicks ?? 0,
             impressions: row.impressions ?? 0,
@@ -58,7 +63,7 @@ export async function syncGscData(
         } else {
           upsertGscQueryRow({
             domain,
-            date: endDate,
+            date,
             query: key,
             clicks: row.clicks ?? 0,
             impressions: row.impressions ?? 0,
@@ -81,7 +86,7 @@ export async function syncGscData(
       requestBody: {
         startDate,
         endDate,
-        dimensions: ["page", "query"],
+        dimensions: ["date", "page", "query"],
         rowLimit,
         startRow,
       },
@@ -90,9 +95,9 @@ export async function syncGscData(
     for (const row of rows) {
       upsertGscPageQueryRow({
         domain,
-        date: endDate,
-        page: row.keys?.[0] ?? "",
-        query: row.keys?.[1] ?? "",
+        date: rowDateKey(row.keys?.[0]),
+        page: row.keys?.[1] ?? "",
+        query: row.keys?.[2] ?? "",
         clicks: row.clicks ?? 0,
         impressions: row.impressions ?? 0,
         ctr: row.ctr ?? 0,

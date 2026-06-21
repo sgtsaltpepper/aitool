@@ -7,6 +7,14 @@ function dateStr(daysAgo: number): string {
   return new Date(Date.now() - daysAgo * 86400000).toISOString().slice(0, 10);
 }
 
+export function normalizeGa4Date(value: string): string {
+  if (/^\d{8}$/.test(value)) {
+    return `${value.slice(0, 4)}-${value.slice(4, 6)}-${value.slice(6, 8)}`;
+  }
+
+  return value;
+}
+
 export async function syncGa4Data(
   domain: string,
   propertyId: string,
@@ -35,7 +43,7 @@ export async function syncGa4Data(
 
   for (const row of data.rows ?? []) {
     const page = row.dimensionValues?.[0]?.value ?? "";
-    const date = row.dimensionValues?.[1]?.value ?? "";
+    const date = normalizeGa4Date(row.dimensionValues?.[1]?.value ?? "");
     const sessions = parseInt(row.metricValues?.[0]?.value ?? "0", 10);
     const conversions = parseInt(row.metricValues?.[1]?.value ?? "0", 10);
     const bounceRate = parseFloat(row.metricValues?.[2]?.value ?? "0");
