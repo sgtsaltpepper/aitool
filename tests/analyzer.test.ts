@@ -95,7 +95,7 @@ function createPage(overrides: Partial<PageSnapshot>): PageSnapshot {
 }
 
 describe("buildAuditReport", () => {
-  it("scorer SSR/answer-first bedre enn CSR med tom initial HTML", () => {
+  it("scorer SSR/answer-first bedre enn CSR med tom initial HTML", async () => {
     const strongPage = createPage({});
     const weakPage = createPage({
       url: "https://example.no/csr",
@@ -134,7 +134,7 @@ describe("buildAuditReport", () => {
       },
     });
 
-    const strongReport = buildAuditReport({
+    const strongReport = await buildAuditReport({
       runId: "strong",
       request,
       targetPages: [strongPage],
@@ -142,7 +142,7 @@ describe("buildAuditReport", () => {
       previousReport: null,
       indexNowStatus: "unknown",
     });
-    const weakReport = buildAuditReport({
+    const weakReport = await buildAuditReport({
       runId: "weak",
       request,
       targetPages: [weakPage],
@@ -159,7 +159,7 @@ describe("buildAuditReport", () => {
     );
   });
 
-  it("gir provider-spesifikke varsler når OpenAI/Bing blokkeres", () => {
+  it("gir provider-spesifikke varsler når OpenAI/Bing blokkeres", async () => {
     const blockedPage = createPage({
       robotsEvaluation: {
         generalAllowed: true,
@@ -168,7 +168,7 @@ describe("buildAuditReport", () => {
       },
     });
 
-    const report = buildAuditReport({
+    const report = await buildAuditReport({
       runId: "blocked",
       request,
       targetPages: [blockedPage],
@@ -185,7 +185,7 @@ describe("buildAuditReport", () => {
     );
   });
 
-  it("flagger schema-avvik som risiko for Google/Gemini", () => {
+  it("flagger schema-avvik som risiko for Google/Gemini", async () => {
     const mismatchPage = createPage({
       schema: {
         types: ["Article"],
@@ -195,7 +195,7 @@ describe("buildAuditReport", () => {
       },
     });
 
-    const report = buildAuditReport({
+    const report = await buildAuditReport({
       runId: "schema",
       request,
       targetPages: [mismatchPage],
@@ -210,7 +210,7 @@ describe("buildAuditReport", () => {
     );
   });
 
-  it("finner konkurransegap når konkurrenter dekker mer og svarer raskere", () => {
+  it("finner konkurransegap når konkurrenter dekker mer og svarer raskere", async () => {
     const targetPage = createPage({
       answerFirstSignals: {
         conciseOpening: false,
@@ -238,7 +238,7 @@ describe("buildAuditReport", () => {
       datePublished: "2026-03-10T00:00:00.000Z",
     });
 
-    const report = buildAuditReport({
+    const report = await buildAuditReport({
       runId: "competition",
       request: { ...request, competitorUrls: ["https://konkurrent.no"] },
       targetPages: [targetPage],
@@ -253,8 +253,8 @@ describe("buildAuditReport", () => {
     expect(report.competitiveContext?.gaps.some((gap) => gap.gapType === "answer-first-gap")).toBe(true);
   });
 
-  it("oppretter ikke technical-metadata issue når technicalOptimization er god nok", () => {
-    const report = buildAuditReport({
+  it("oppretter ikke technical-metadata issue når technicalOptimization er god nok", async () => {
+    const report = await buildAuditReport({
       runId: "technical-ok",
       request,
       targetPages: [createPage({})],
@@ -267,8 +267,8 @@ describe("buildAuditReport", () => {
     expect(report.issues.some((issue) => issue.id === "technical-metadata")).toBe(false);
   });
 
-  it("setter indexNowStatus uten å lene seg på bodyText", () => {
-    const report = buildAuditReport({
+  it("setter indexNowStatus uten å lene seg på bodyText", async () => {
+    const report = await buildAuditReport({
       runId: "indexnow",
       request,
       targetPages: [createPage({ bodyText: "Denne teksten nevner ikke noe spesielt." })],
@@ -281,7 +281,7 @@ describe("buildAuditReport", () => {
     expect(report.issues.some((issue) => issue.id === "indexnow-readiness")).toBe(true);
   });
 
-  it("foreslår forbedret struktur, metadata og schema for en svak side", () => {
+  it("foreslår forbedret struktur, metadata og schema for en svak side", async () => {
     const weakPage = createPage({
       title: "Planlegge julebord",
       h1: "Planlegge julebord",
@@ -306,7 +306,7 @@ describe("buildAuditReport", () => {
       dateModified: null,
     });
 
-    const report = buildAuditReport({
+    const report = await buildAuditReport({
       runId: "suggestions",
       request,
       targetPages: [weakPage],
@@ -324,13 +324,14 @@ describe("buildAuditReport", () => {
     expect(suggestion.proposed.cta.length).toBeGreaterThan(0);
     expect(suggestion.proposed.metaTitle).toContain("Planlegge julebord");
     expect(suggestion.proposed.metaTitle.length).toBeLessThanOrEqual(60);
-    expect(suggestion.proposed.metaDescription.length).toBeGreaterThan(100);
+    expect(suggestion.proposed.metaDescription.length).toBeGreaterThan(70);
+    expect(suggestion.proposed.metaDescription).not.toMatch(/på godt norsk|forklarer|forklart enkelt|denne siden/i);
     expect(suggestion.proposed.schemaType).toBeTruthy();
     expect(suggestion.proposed.jsonLd).toContain("\"@context\": \"https://schema.org\"");
     expect(suggestion.rationale.join(" ")).toContain("JSON-LD");
   });
 
-  it("bygger egen pageReport for sideanalyse og analyserer kun én side", () => {
+  it("bygger egen pageReport for sideanalyse og analyserer kun én side", async () => {
     const pageRequest: AuditRequestInput = {
       mode: "page",
       targetUrl: "https://example.no/tryllekunstner",
@@ -339,7 +340,7 @@ describe("buildAuditReport", () => {
       competitorUrls: [],
       maxPages: 1,
     };
-    const report = buildAuditReport({
+    const report = await buildAuditReport({
       runId: "page-mode",
       request: pageRequest,
       targetPages: [
@@ -363,7 +364,7 @@ describe("buildAuditReport", () => {
     expect(report.competitiveContext).toBeNull();
   });
 
-  it("bygger implementation pack med predicted impact for svak side", () => {
+  it("bygger implementation pack med predicted impact for svak side", async () => {
     const weakPage = createPage({
       title: "Kort side",
       metaDescription: "Kort.",
@@ -390,7 +391,7 @@ describe("buildAuditReport", () => {
       dateModified: null,
     });
 
-    const report = buildAuditReport({
+    const report = await buildAuditReport({
       runId: "implementation-pack",
       request,
       targetPages: [weakPage],
@@ -422,7 +423,7 @@ describe("buildAuditReport", () => {
     );
   });
 
-  it("begrenser implementation packs i domain mode til toppsider", () => {
+  it("begrenser implementation packs i domain mode til toppsider", async () => {
     const pages = Array.from({ length: 7 }, (_, index) =>
       createPage({
         url: `https://example.no/page-${index}`,
@@ -441,7 +442,7 @@ describe("buildAuditReport", () => {
       }),
     );
 
-    const report = buildAuditReport({
+    const report = await buildAuditReport({
       runId: "implementation-limit",
       request,
       targetPages: pages,
@@ -453,7 +454,7 @@ describe("buildAuditReport", () => {
     expect(report.implementationPacks.length).toBeLessThanOrEqual(5);
   });
 
-  it("bruker GSC og GA4 til å spisse metadata og innholdsforslag", () => {
+  it("bruker GSC og GA4 til å spisse metadata og innholdsforslag", async () => {
     const domain = `test-${randomUUID().slice(0, 8)}.no`;
     const pageUrl = `https://${domain}/julebord`;
     const page = createPage({
@@ -513,7 +514,7 @@ describe("buildAuditReport", () => {
       bounceRate: 0.61,
     });
 
-    const report = buildAuditReport({
+    const report = await buildAuditReport({
       runId: "search-insight",
       request: {
         ...request,
@@ -532,5 +533,37 @@ describe("buildAuditReport", () => {
     expect(report.pageReport?.proposed.metaDescription).toContain("bedrifter");
     expect(report.pageReport?.proposed.metaDescription).toMatch(/meny|priser|booking/i);
     expect(report.pageSuggestions[0]?.proposed.contentNotes.join(" ")).toMatch(/CTA|pris|søket/i);
+  });
+
+  it("klassifiserer /meny som transactional og lar det påvirke metadataforslaget", async () => {
+    const pageUrl = "https://example.no/meny";
+    const page = createPage({
+      url: pageUrl,
+      path: "/meny",
+      title: "Meny | Eksempel",
+      metaDescription: "Se menyen vår.",
+      h1: "Meny",
+      headings: ["Meny", "Bestill bord"],
+      firstParagraph: "Se meny og bestill bord for ditt neste besøk.",
+      bodyText: "Se meny, åpningstider og bestill bord for ditt neste besøk hos oss.",
+      hasContactLink: true,
+    });
+
+    const report = await buildAuditReport({
+      runId: "menu-intent",
+      request: {
+        ...request,
+        mode: "page",
+        targetUrl: pageUrl,
+        maxPages: 1,
+      },
+      targetPages: [page],
+      competitorPagesByDomain: {},
+      previousReport: null,
+      indexNowStatus: "unknown",
+    });
+
+    expect(report.pageReport?.intent).toEqual({ primary: "transactional" });
+    expect(report.pageReport?.proposed.metaDescription).toMatch(/bestill|meny|booking/i);
   });
 });

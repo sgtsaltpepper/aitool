@@ -3,6 +3,9 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import type {
+  AuditChangeLogEntry,
+  AuditChangeSnapshot,
+  AuditMode,
   AuditProgress,
   AuditReport,
   AuditRequestInput,
@@ -23,7 +26,7 @@ import type {
   PageImprovementSuggestion,
   PageSnapshot,
 } from "@/lib/types";
-import { readableExcerpt } from "@/lib/utils";
+import { normalizeUrl, readableExcerpt } from "@/lib/utils";
 
 const dataDir = join(process.cwd(), ".data");
 const databasePath = join(dataDir, "audits.sqlite");
@@ -158,6 +161,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS opportunity_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     snapshot_id INTEGER NOT NULL,
+    sort_score REAL NOT NULL DEFAULT 0,
     domain TEXT NOT NULL,
     target_url TEXT NOT NULL,
     page_url TEXT NOT NULL,
@@ -186,17 +190,44 @@ db.exec(`
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(domain, week_start)
   );
+
+  CREATE TABLE IF NOT EXISTS audit_change_events (
+    id TEXT PRIMARY KEY,
+    audit_run_id TEXT NOT NULL,
+    target_url TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    page_url TEXT NOT NULL,
+    change_type TEXT NOT NULL,
+    change_title TEXT NOT NULL,
+    change_summary TEXT NOT NULL,
+    baseline_json TEXT NOT NULL,
+    expected_json TEXT NOT NULL,
+    notes TEXT NOT NULL DEFAULT '',
+    applied_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+`);
+
+ensureTableColumn("opportunity_items", "sort_score", "REAL NOT NULL DEFAULT 0");
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_audit_change_events_target_mode_applied
+  ON audit_change_events (target_url, mode, applied_at DESC);
 `);
 
 recoverStaleAuditRuns();
 
-function ensureColumn(name: string, definition: string): void {
-  const columns = db.prepare(`PRAGMA table_info(audit_runs)`).all() as Array<{ name: string }>;
+function ensureTableColumn(table: string, name: string, definition: string): void {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   if (columns.some((column) => column.name === name)) {
     return;
   }
 
-  db.exec(`ALTER TABLE audit_runs ADD COLUMN ${name} ${definition}`);
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${definition}`);
+}
+
+function ensureColumn(name: string, definition: string): void {
+  ensureTableColumn("audit_runs", name, definition);
 }
 
 function parseJson<T>(value: string | null): T | null {
@@ -249,6 +280,65 @@ function compressReport(report: AuditReport): AuditReport {
     ...report,
     pages: report.pages.map(compressPageSnapshot),
   };
+}
+
+function normalizeAuditChangeSnapshot(snapshot: AuditChangeSnapshot): AuditChangeSnapshot {
+  return {
+    url: normalizeUrl(snapshot.url),
+    h1: snapshot.h1.trim(),
+    opening: snapshot.opening.trim(),
+    metaTitle: snapshot.metaTitle.trim(),
+    metaDescription: snapshot.metaDescription.trim(),
+    schemaTypes: snapshot.schemaTypes.map((item) => item.trim()).filter(Boolean),
+  };
+}
+
+function changedSnapshotFields(baseline: AuditChangeSnapshot, expected: AuditChangeSnapshot): Array<keyof AuditChangeSnapshot> {
+  const fields: Array<keyof AuditChangeSnapshot> = ["h1", "opening", "metaTitle", "metaDescription", "schemaTypes"];
+  return fields.filter((field) => JSON.stringify(baseline[field]) !== JSON.stringify(expected[field]));
+}
+
+function snapshotMatchesExpected(
+  observed: AuditChangeSnapshot,
+  expected: AuditChangeSnapshot,
+  changedFields: Array<keyof AuditChangeSnapshot>,
+): Array<keyof AuditChangeSnapshot> {
+  return changedFields.filter((field) => {
+    if (field === "schemaTypes") {
+      return expected.schemaTypes.every((type) => observed.schemaTypes.includes(type));
+    }
+
+    return observed[field] === expected[field];
+  });
+}
+
+function snapshotFromPage(page: PageSnapshot): AuditChangeSnapshot {
+  return {
+    url: normalizeUrl(page.url),
+    h1: page.h1,
+    opening: page.firstParagraph || readableExcerpt(page.bodyText, 220),
+    metaTitle: page.title,
+    metaDescription: page.metaDescription,
+    schemaTypes: page.schema.types,
+  };
+}
+
+function snapshotFromReport(report: AuditReport, pageUrl: string): AuditChangeSnapshot | null {
+  const normalizedPageUrl = normalizeUrl(pageUrl);
+
+  if (report.pageReport && normalizeUrl(report.pageReport.current.url) === normalizedPageUrl) {
+    return {
+      url: normalizedPageUrl,
+      h1: report.pageReport.current.h1,
+      opening: report.pageReport.current.opening,
+      metaTitle: report.pageReport.current.metaTitle,
+      metaDescription: report.pageReport.current.metaDescription,
+      schemaTypes: report.pageReport.current.schemaTypes,
+    };
+  }
+
+  const page = report.pages.find((entry) => normalizeUrl(entry.url) === normalizedPageUrl);
+  return page ? snapshotFromPage(page) : null;
 }
 
 export function createAuditRun(id: string, request: AuditRequestInput): AuditRunRecord {
@@ -464,6 +554,216 @@ export function getAuditReport(id: string): AuditReport | null {
   }
 
   return JSON.parse(row.report_json) as AuditReport;
+}
+
+function evaluateAuditChange(
+  entry: Omit<AuditChangeLogEntry, "evaluation" | "changedFields">,
+): AuditChangeLogEntry {
+  const changedFields = changedSnapshotFields(entry.baseline, entry.expected);
+  const baselineScore = getAuditRun(entry.auditRunId)?.summary?.totalScore ?? null;
+  const runs = db
+    .prepare(
+      `
+        SELECT id, report_json, summary_json, completed_at
+        FROM audit_runs
+        WHERE target_url = ?
+          AND status = 'completed'
+          AND completed_at IS NOT NULL
+          AND completed_at >= ?
+          AND id != ?
+          AND request_json LIKE ?
+        ORDER BY completed_at ASC
+      `,
+    )
+    .all(entry.targetUrl, entry.appliedAt, entry.auditRunId, `%"mode":"${entry.mode}"%`) as Array<{
+    id: string;
+    report_json: string | null;
+    summary_json: string | null;
+    completed_at: string;
+  }>;
+
+  if (!runs.length) {
+    return {
+      ...entry,
+      changedFields,
+      evaluation: {
+        status: "awaiting-recheck",
+        checkedRunId: null,
+        checkedAt: null,
+        verifiedAt: null,
+        scoreDelta: null,
+        matchedFields: [],
+        missingFields: changedFields,
+        observed: null,
+        summary: "Endringen er logget, men det finnes ingen nyere ferdig audit som kan bekrefte den ennå.",
+      },
+    };
+  }
+
+  let latestObserved: AuditChangeSnapshot | null = null;
+  let latestRunId: string | null = null;
+  let latestCompletedAt: string | null = null;
+  let latestScoreDelta: number | null = null;
+
+  for (const run of runs) {
+    const summary = parseJson<AuditRunSummary>(run.summary_json);
+    latestScoreDelta = summary && baselineScore !== null ? summary.totalScore - baselineScore : null;
+    latestRunId = run.id;
+    latestCompletedAt = run.completed_at;
+
+    if (!run.report_json) {
+      continue;
+    }
+
+    const report = JSON.parse(run.report_json) as AuditReport;
+    const observed = snapshotFromReport(report, entry.pageUrl);
+    latestObserved = observed;
+
+    if (!observed) {
+      continue;
+    }
+
+    const matchedFields = snapshotMatchesExpected(observed, entry.expected, changedFields);
+    if (matchedFields.length === changedFields.length) {
+      return {
+        ...entry,
+        changedFields,
+        evaluation: {
+          status: "confirmed",
+          checkedRunId: run.id,
+          checkedAt: run.completed_at,
+          verifiedAt: run.completed_at,
+          scoreDelta: latestScoreDelta,
+          matchedFields,
+          missingFields: [],
+          observed,
+          summary: "Senere audit bekrefter at de loggede feltene nå samsvarer med den forventede endringen.",
+        },
+      };
+    }
+  }
+
+  const matchedFields = latestObserved ? snapshotMatchesExpected(latestObserved, entry.expected, changedFields) : [];
+
+  return {
+    ...entry,
+    changedFields,
+    evaluation: {
+      status: "not-detected",
+      checkedRunId: latestRunId,
+      checkedAt: latestCompletedAt,
+      verifiedAt: null,
+      scoreDelta: latestScoreDelta,
+      matchedFields,
+      missingFields: changedFields.filter((field) => !matchedFields.includes(field)),
+      observed: latestObserved,
+      summary: latestObserved
+        ? "Nyere audit finnes, men den viser ikke hele den forventede endringen på siden ennå."
+        : "Nyere audit finnes, men siden kunne ikke gjenkjennes i rapporten for å bekrefte endringen.",
+    },
+  };
+}
+
+export function createAuditChangeEvent(entry: {
+  id: string;
+  auditRunId: string;
+  targetUrl: string;
+  mode: AuditMode;
+  pageUrl: string;
+  changeType: "page-report" | "implementation-pack";
+  changeTitle: string;
+  changeSummary: string;
+  baseline: AuditChangeSnapshot;
+  expected: AuditChangeSnapshot;
+  notes: string;
+  appliedAt: string;
+}): AuditChangeLogEntry {
+  const createdAt = new Date().toISOString();
+  const baseline = normalizeAuditChangeSnapshot(entry.baseline);
+  const expected = normalizeAuditChangeSnapshot(entry.expected);
+
+  db.prepare(
+    `
+      INSERT INTO audit_change_events (
+        id, audit_run_id, target_url, mode, page_url, change_type, change_title, change_summary,
+        baseline_json, expected_json, notes, applied_at, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `,
+  ).run(
+    entry.id,
+    entry.auditRunId,
+    normalizeUrl(entry.targetUrl),
+    entry.mode,
+    normalizeUrl(entry.pageUrl),
+    entry.changeType,
+    entry.changeTitle,
+    entry.changeSummary,
+    JSON.stringify(baseline),
+    JSON.stringify(expected),
+    entry.notes.trim(),
+    entry.appliedAt,
+    createdAt,
+  );
+
+  return listAuditChangeEvents(entry.targetUrl, entry.mode).find((item) => item.id === entry.id)!;
+}
+
+export function listAuditChangeEvents(targetUrl: string, mode: AuditMode): AuditChangeLogEntry[] {
+  const rows = db
+    .prepare(
+      `
+        SELECT
+          id,
+          audit_run_id,
+          target_url,
+          mode,
+          page_url,
+          change_type,
+          change_title,
+          change_summary,
+          baseline_json,
+          expected_json,
+          notes,
+          applied_at,
+          created_at
+        FROM audit_change_events
+        WHERE target_url = ? AND mode = ?
+        ORDER BY applied_at DESC, created_at DESC
+      `,
+    )
+    .all(normalizeUrl(targetUrl), mode) as Array<{
+    id: string;
+    audit_run_id: string;
+    target_url: string;
+    mode: AuditMode;
+    page_url: string;
+    change_type: "page-report" | "implementation-pack";
+    change_title: string;
+    change_summary: string;
+    baseline_json: string;
+    expected_json: string;
+    notes: string;
+    applied_at: string;
+    created_at: string;
+  }>;
+
+  return rows.map((row) =>
+    evaluateAuditChange({
+      id: row.id,
+      auditRunId: row.audit_run_id,
+      targetUrl: row.target_url,
+      mode: row.mode,
+      pageUrl: row.page_url,
+      changeType: row.change_type,
+      changeTitle: row.change_title,
+      changeSummary: row.change_summary,
+      baseline: JSON.parse(row.baseline_json) as AuditChangeSnapshot,
+      expected: JSON.parse(row.expected_json) as AuditChangeSnapshot,
+      notes: row.notes,
+      appliedAt: row.applied_at,
+      createdAt: row.created_at,
+    }),
+  );
 }
 
 export function listAuditRuns(limit = 20): AuditRunRecord[] {
@@ -802,14 +1102,48 @@ export function createOpportunitySnapshot(domain: string, count: number): number
   return Number(result.lastInsertRowid);
 }
 
+export function listOpportunitySnapshots(opts: {
+  domain?: string;
+  limit?: number;
+} = {}): OpportunitySnapshot[] {
+  const params: Array<string | number> = [];
+  const where = opts.domain ? "WHERE domain = ?" : "";
+  if (opts.domain) {
+    params.push(opts.domain);
+  }
+  params.push(opts.limit ?? 50);
+
+  const rows = db
+    .prepare(
+      `SELECT id, domain, generated_at, opportunity_count
+       FROM opportunity_snapshots
+       ${where}
+       ORDER BY generated_at DESC, id DESC
+       LIMIT ?`,
+    )
+    .all(...params) as Array<{
+    id: number;
+    domain: string;
+    generated_at: string;
+    opportunity_count: number;
+  }>;
+
+  return rows.map((row) => ({
+    id: row.id,
+    domain: row.domain,
+    generatedAt: row.generated_at,
+    opportunityCount: row.opportunity_count,
+  }));
+}
+
 export function insertOpportunityItem(item: Omit<Opportunity, "id" | "createdAt">): void {
   db.prepare(
     `INSERT INTO opportunity_items
-     (snapshot_id, domain, target_url, page_url, query, query_cluster, type, priority, title,
+     (snapshot_id, sort_score, domain, target_url, page_url, query, query_cluster, type, priority, title,
       evidence_json, recommended_action, expected_impact, implementation_pack_id, status)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
-    item.snapshotId, item.domain, item.targetUrl, item.pageUrl, item.query ?? null,
+    item.snapshotId, item.sortScore, item.domain, item.targetUrl, item.pageUrl, item.query ?? null,
     item.queryCluster ?? null, item.type, item.priority, item.title,
     JSON.stringify(item.evidence), item.recommendedAction, item.expectedImpact,
     item.implementationPackId ?? null, item.status,
@@ -817,7 +1151,7 @@ export function insertOpportunityItem(item: Omit<Opportunity, "id" | "createdAt"
 }
 
 type OpportunityRow = {
-  id: number; snapshot_id: number; domain: string; target_url: string; page_url: string;
+  id: number; snapshot_id: number; sort_score: number; domain: string; target_url: string; page_url: string;
   query: string | null; query_cluster: string | null; type: string; priority: string;
   title: string; evidence_json: string; recommended_action: string; expected_impact: string;
   implementation_pack_id: number | null; status: string; created_at: string;
@@ -827,6 +1161,7 @@ function rowToOpportunity(r: OpportunityRow): Opportunity {
   return {
     id: r.id,
     snapshotId: r.snapshot_id,
+    sortScore: r.sort_score,
     domain: r.domain,
     targetUrl: r.target_url,
     pageUrl: r.page_url,
@@ -854,6 +1189,9 @@ export function listOpportunities(opts: {
   const conditions: string[] = [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const params: any[] = [];
+  conditions.push(
+    "snapshot_id IN (SELECT MAX(id) FROM opportunity_snapshots GROUP BY domain)",
+  );
   if (opts.domain) { conditions.push("domain=?"); params.push(opts.domain); }
   if (opts.status) { conditions.push("status=?"); params.push(opts.status); }
   if (opts.type) { conditions.push("type=?"); params.push(opts.type); }
@@ -861,7 +1199,7 @@ export function listOpportunities(opts: {
   const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
   const limit = opts.limit ?? 200;
   const rows = db
-    .prepare(`SELECT * FROM opportunity_items ${where} ORDER BY CASE priority WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END, created_at DESC LIMIT ?`)
+    .prepare(`SELECT * FROM opportunity_items ${where} ORDER BY sort_score DESC, created_at DESC LIMIT ?`)
     .all(...params, limit) as unknown as OpportunityRow[];
   return rows.map(rowToOpportunity);
 }
@@ -917,6 +1255,50 @@ export function getTopQueriesForPage(
        LIMIT ?`,
     )
     .all(domain, page, since, limit) as { query: string; clicks: number; impressions: number; ctr: number; position: number }[];
+}
+
+export function findCanonicalPageUrl(domain: string, path: string): string | null {
+  const rows = db
+    .prepare(
+      `SELECT page
+       FROM (
+         SELECT page, SUM(impressions) AS weight
+         FROM gsc_page_daily
+         WHERE domain = ?
+         GROUP BY page
+         UNION ALL
+         SELECT page, SUM(impressions) AS weight
+         FROM gsc_page_query_daily
+         WHERE domain = ?
+         GROUP BY page
+       )
+       ORDER BY weight DESC
+       LIMIT 500`,
+    )
+    .all(domain, domain) as Array<{ page: string }>;
+
+  const normalizedPath = path || "/";
+  let fallback: string | null = null;
+
+  for (const row of rows) {
+    try {
+      const parsed = new URL(row.page);
+      fallback ??= parsed.toString();
+      if (parsed.pathname === normalizedPath) {
+        return parsed.toString();
+      }
+      if (normalizedPath !== "/" && `${parsed.pathname}/` === normalizedPath) {
+        return parsed.toString();
+      }
+      if (normalizedPath !== "/" && parsed.pathname === `${normalizedPath}/`) {
+        return parsed.toString();
+      }
+    } catch {
+      // Ignore malformed stored URLs.
+    }
+  }
+
+  return fallback;
 }
 
 export function getGscMetricsForPage(

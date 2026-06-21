@@ -171,7 +171,7 @@ async function executeAuditRun(id: string, request: AuditRequestInput): Promise<
     });
 
     const previousReport = findPreviousCompletedRun(request.targetUrl, id);
-    const report = buildAuditReport({
+    const report = await buildAuditReport({
       runId: id,
       request,
       targetPages: targetCrawl.pages,

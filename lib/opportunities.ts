@@ -6,8 +6,81 @@ import {
   insertOpportunityItem,
 } from "@/lib/db";
 import type { Opportunity, OpportunityPriority } from "@/lib/types";
+import { extractTextTokens, unique } from "@/lib/utils";
 
 type Draft = Omit<Opportunity, "id" | "createdAt">;
+
+const GENERIC_VENUE_TOKENS = new Set([
+  "oslo",
+  "night",
+  "club",
+  "nightclub",
+  "utested",
+  "uteliv",
+  "bar",
+  "lounge",
+  "restaurant",
+  "premier",
+  "experience",
+  "experiences",
+  "clubbing",
+]);
+
+const KEEP_SEPARATE_PATH_TOKENS = new Set([
+  "booking",
+  "book",
+  "kontakt",
+  "contact",
+  "meny",
+  "menu",
+  "apningstider",
+  "opening",
+  "hours",
+  "bordbooking",
+  "gjesteliste",
+  "guestlist",
+  "events",
+  "event",
+  "arrangement",
+  "lost",
+  "found",
+]);
+
+const NORWEGIAN_LANGUAGE_PATTERNS = [
+  /\båpningstider\b/i,
+  /\bapningstider\b/i,
+  /\bbestill\b/i,
+  /\bbord\b/i,
+  /\bmeny\b/i,
+  /\bkontakt\b/i,
+  /\buteliv\b/i,
+  /\butested(?:er)?\b/i,
+  /\bgjesteliste\b/i,
+  /\bbryllup\b/i,
+  /\bjulebord\b/i,
+  /\bselskapslokale\b/i,
+  /\bhva\b/i,
+  /\bhvordan\b/i,
+  /[æøå]/i,
+];
+
+const ENGLISH_LANGUAGE_PATTERNS = [
+  /\bbooking\b/i,
+  /\bbook\b/i,
+  /\bmenu\b/i,
+  /\bcontact\b/i,
+  /\bopening(?:-|\s)?hours\b/i,
+  /\bnightclub\b/i,
+  /\bnight club\b/i,
+  /\bexperience\b/i,
+  /\bevents\b/i,
+  /\bguestlist\b/i,
+  /\blost\b/i,
+  /\bfound\b/i,
+  /\bwedding\b/i,
+  /\bparty\b/i,
+  /\bprivate\b/i,
+];
 
 function priority(p: number): OpportunityPriority {
   if (p >= 4) return "critical";
@@ -16,8 +89,156 @@ function priority(p: number): OpportunityPriority {
   return "low";
 }
 
+function calculateSortScore(
+  type: Opportunity["type"],
+  trafficWeightInput: number,
+  createdAt: Date,
+): number {
+  let baseScore = 500;
+
+  switch (type) {
+    case "high-traffic-low-conversion":
+      baseScore = 5000;
+      break;
+    case "indexing-blocker":
+      baseScore = 4500;
+      break;
+    case "high-impressions-low-ctr":
+      baseScore = 3000;
+      break;
+    case "traffic-down":
+      baseScore = 2600;
+      break;
+    case "query-gap":
+      baseScore = 1800;
+      break;
+    case "near-page-one":
+      baseScore = 1500;
+      break;
+    default:
+      baseScore = 500;
+      break;
+  }
+
+  const trafficWeight = Math.min(trafficWeightInput * 0.1, 2000);
+  const ageInHours = (Date.now() - createdAt.getTime()) / (1000 * 60 * 60);
+  const freshnessWeight = Math.max(100 - ageInHours, 0) * 0.1;
+
+  return baseScore + trafficWeight + freshnessWeight;
+}
+
 function pathname(url: string): string {
   try { return new URL(url.startsWith("http") ? url : `https://${url}`).pathname; } catch { return url; }
+}
+
+function domainTokens(domain: string): string[] {
+  return unique(
+    domain
+      .toLowerCase()
+      .split(/[.\s_-]+/)
+      .flatMap((token) => extractTextTokens(token))
+      .flatMap((token) => token.split(/(?=nightclub|night|club|restaurant|bar|lounge|hotel|cafe|kafe)/))
+      .filter((token) => token.length > 1),
+  );
+}
+
+function isGenericVenueToken(token: string): boolean {
+  return GENERIC_VENUE_TOKENS.has(token) || token.startsWith("oslo");
+}
+
+export function isBrandLikeQuery(query: string, domain: string): boolean {
+  const brandTokens = new Set(domainTokens(domain));
+  const tokens = extractTextTokens(query);
+  if (!tokens.length) {
+    return false;
+  }
+
+  const nonBrandTokens = tokens.filter((token) => !brandTokens.has(token));
+  return nonBrandTokens.every((token) => isGenericVenueToken(token));
+}
+
+function pathTokens(page: string): string[] {
+  return unique(
+    pathname(page)
+      .split(/[\/_-]+/)
+      .flatMap((token) => extractTextTokens(token)),
+  );
+}
+
+function detectTextLanguage(text: string): "no" | "en" | "unknown" {
+  let noScore = 0;
+  let enScore = 0;
+
+  for (const pattern of NORWEGIAN_LANGUAGE_PATTERNS) {
+    if (pattern.test(text)) {
+      noScore += 1;
+    }
+  }
+  for (const pattern of ENGLISH_LANGUAGE_PATTERNS) {
+    if (pattern.test(text)) {
+      enScore += 1;
+    }
+  }
+
+  if (noScore === 0 && enScore === 0) {
+    return "unknown";
+  }
+  if (noScore > enScore) {
+    return "no";
+  }
+  if (enScore > noScore) {
+    return "en";
+  }
+  return "unknown";
+}
+
+export function urlLanguageMatchesQuery(query: string, page: string): boolean | null {
+  const queryLanguage = detectTextLanguage(query);
+  const urlLanguage = detectTextLanguage(pathname(page).replace(/[\/_-]+/g, " "));
+
+  if (queryLanguage === "unknown" || urlLanguage === "unknown") {
+    return null;
+  }
+
+  return queryLanguage === urlLanguage;
+}
+
+function isHomepage(page: string): boolean {
+  const path = pathname(page);
+  return path === "/" || path === "";
+}
+
+export function shouldConsiderHomepageRedirect(args: {
+  domain: string;
+  page: string;
+  query: string;
+  pageClicks: number;
+  pageImpressions: number;
+}): boolean {
+  if (isHomepage(args.page)) {
+    return false;
+  }
+
+  if (!isBrandLikeQuery(args.query, args.domain)) {
+    return false;
+  }
+
+  if (args.pageClicks > 25 || args.pageImpressions > 2000) {
+    return false;
+  }
+
+  const tokens = pathTokens(args.page);
+  if (!tokens.length) {
+    return false;
+  }
+
+  if (tokens.some((token) => KEEP_SEPARATE_PATH_TOKENS.has(token))) {
+    return false;
+  }
+
+  const brandTokens = new Set(domainTokens(args.domain));
+  const meaningfulTokens = tokens.filter((token) => !brandTokens.has(token) && !isGenericVenueToken(token));
+  return meaningfulTokens.length === 0;
 }
 
 export async function generateOpportunities(domain: string): Promise<number> {
@@ -61,6 +282,7 @@ export async function generateOpportunities(domain: string): Promise<number> {
   }
 
   const snapshotId = 0;
+  const generatedAt = new Date();
 
   // ─── Regel 1: Høye visninger, lav CTR ────────────────────────────────────────
   for (const [page, agg] of pageAgg) {
@@ -71,6 +293,7 @@ export async function generateOpportunities(domain: string): Promise<number> {
       const extraClicks = Math.round(agg.impressions * 0.02);
       drafts.push({
         snapshotId,
+        sortScore: calculateSortScore("high-impressions-low-ctr", agg.impressions, generatedAt),
         domain,
         targetUrl: `https://${domain}`,
         pageUrl: page,
@@ -95,6 +318,7 @@ export async function generateOpportunities(domain: string): Promise<number> {
       const posLabel = avgPos.toFixed(1);
       drafts.push({
         snapshotId,
+        sortScore: calculateSortScore("near-page-one", agg.impressions, generatedAt),
         domain,
         targetUrl: `https://${domain}`,
         pageUrl: page,
@@ -131,6 +355,7 @@ export async function generateOpportunities(domain: string): Promise<number> {
       const lost = prevClicks - recentClicks;
       drafts.push({
         snapshotId,
+        sortScore: calculateSortScore("traffic-down", prevClicks, generatedAt),
         domain,
         targetUrl: `https://${domain}`,
         pageUrl: page,
@@ -155,6 +380,7 @@ export async function generateOpportunities(domain: string): Promise<number> {
       const potentialConv = Math.round(ga4.sessions * 0.02);
       drafts.push({
         snapshotId,
+        sortScore: calculateSortScore("high-traffic-low-conversion", ga4.sessions, generatedAt),
         domain,
         targetUrl: `https://${domain}`,
         pageUrl: page,
@@ -187,8 +413,18 @@ export async function generateOpportunities(domain: string): Promise<number> {
   for (const [query, data] of queryOnlyAgg) {
     if (data.impressions >= 100) {
       const potentialClicks = Math.round(data.impressions * 0.05);
+      const pageMetrics = pageAgg.get(data.page);
+      const redirectCandidate = shouldConsiderHomepageRedirect({
+        domain,
+        page: data.page,
+        query,
+        pageClicks: pageMetrics?.clicks ?? 0,
+        pageImpressions: pageMetrics?.impressions ?? 0,
+      });
+      const languageMatch = urlLanguageMatchesQuery(query, data.page);
       drafts.push({
         snapshotId,
+        sortScore: calculateSortScore("query-gap", data.impressions, generatedAt),
         domain,
         targetUrl: `https://${domain}`,
         pageUrl: data.page,
@@ -196,9 +432,13 @@ export async function generateOpportunities(domain: string): Promise<number> {
         queryCluster: null,
         type: "query-gap",
         priority: priority(data.impressions >= 500 ? 3 : 2),
-        title: `«${query}» — ${data.impressions.toLocaleString("nb-NO")} visninger, null klikk`,
-        evidence: { query, impressions: data.impressions, position: data.position },
-        recommendedAction: `Søket «${query}» vises ${data.impressions.toLocaleString("nb-NO")} ganger men ingen klikker. Enten mangler det en side som treffer denne intensjonen, eller så matcher ikke title/meta-teksten det søkerne forventer. Vurder å lage en dedikert side eller å optimere den eksisterende sidens tittel slik at den speiler «${query}» tydelig.`,
+        title: redirectCandidate
+          ? `«${query}» treffer trolig feil side`
+          : `«${query}» — ${data.impressions.toLocaleString("nb-NO")} visninger, null klikk`,
+        evidence: { query, impressions: data.impressions, position: data.position, redirectCandidate, urlLanguageMatch: languageMatch },
+        recommendedAction: redirectCandidate
+          ? `Søket «${query}» er merkevarepreget, men trafikken lander på ${pathname(data.page)} i stedet for en sterk hovedside. Vurder om denne URL-en er redundant. Hvis siden ikke har en tydelig egen funksjon, bør du teste om en 301-redirect til forsiden eller en sterkere hovedside vil samle autoritet og gi et klarere klikkmål. Hvis siden skal leve videre, må den få en tydeligere rolle enn i dag.`
+          : `Søket «${query}» vises ${data.impressions.toLocaleString("nb-NO")} ganger men ingen klikker. Enten mangler det en side som treffer denne intensjonen, eller så matcher ikke title/meta-teksten det søkerne forventer. Vurder å lage en dedikert side eller å optimere den eksisterende sidens tittel slik at den speiler «${query}» tydelig.${languageMatch === false ? " Sjekk også om URL-språket samsvarer med søkespråket: en norsk søkefrase mot en engelsk slug, eller omvendt, kan svekke relevanssignalet." : ""}`,
         expectedImpact: `5% CTR på ${data.impressions.toLocaleString("nb-NO")} visninger = ${potentialClicks} ekstra klikk per måned.`,
         implementationPackId: null,
         status: "open",
@@ -206,7 +446,9 @@ export async function generateOpportunities(domain: string): Promise<number> {
     }
   }
 
-  const topDrafts = drafts.slice(0, 100);
+  const topDrafts = [...drafts]
+    .sort((left, right) => right.sortScore - left.sortScore)
+    .slice(0, 100);
   const snapshotIdFinal = createOpportunitySnapshot(domain, topDrafts.length);
   for (const draft of topDrafts) {
     insertOpportunityItem({ ...draft, snapshotId: snapshotIdFinal });

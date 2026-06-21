@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from "next/server";
-import { findLatestPageContext, getGa4MetricsForPage, getGscMetricsForPage, getTopQueriesForPage } from "@/lib/db";
+import { generateAidarSuggestions } from "@/lib/aidar";
+import { generatePerformanceInsights } from "@/lib/performance-insights";
+import { findCanonicalPageUrl, findLatestPageContext, getGa4MetricsForPage, getGscMetricsForPage, getTopQueriesForPage } from "@/lib/db";
 import {
-  buildAudienceAwareDescriptions,
-  buildAudienceAwareTitles,
   buildPageSearchInsights,
 } from "@/lib/meta-suggestions";
 import type { PagePerformanceMetrics, SearchIntent } from "@/lib/types";
+import { unique } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 
@@ -44,13 +45,30 @@ function titleCase(str: string): string {
 }
 
 function detectSearchIntent(path: string, queryText: string): SearchIntent {
-  const haystack = `${path} ${queryText}`.toLowerCase();
-  if (/(pris|priser|bestill|booking|book|reservasjon|kontakt)/i.test(haystack)) {
+  const normalizedPath = path.toLowerCase();
+  const textContext = `${path} ${queryText}`.toLowerCase();
+
+  const transactionalPaths = ["/meny", "/booking", "/bestill", "/kontakt", "/handlekurv", "/kasse", "/checkout", "/reserver", "/tilbud", "/shop"];
+  const transactionalKeywords = ["kjøp", "bestill", "book", "reserver", "meny", "kontakt oss", "add to cart", "prisliste", "booking", "reservasjon", "kontakt"];
+
+  if (transactionalPaths.some((candidate) => normalizedPath.includes(candidate)) || transactionalKeywords.some((keyword) => textContext.includes(keyword))) {
     return "transactional";
   }
-  if (/(vs|beste|alternativ|sammenlign|review|hva bør du velge)/i.test(haystack)) {
+
+  const commercialPaths = ["/priser", "/pakker", "/selskapslokale", "/tjenester", "/produkter", "/løsninger", "/referanser", "/casestudies"];
+  const commercialKeywords = ["beste", "test", "pris", "sammenlign", "erfaringer", "anmeldelser", "vs", "vs.", "hvilken bør jeg velge", "alternativ"];
+
+  if (commercialPaths.some((candidate) => normalizedPath.includes(candidate)) || commercialKeywords.some((keyword) => textContext.includes(keyword))) {
     return "commercial investigation";
   }
+
+  const navigationalPaths = ["/logg-inn", "/login", "/minside", "/dashboard", "/konto", "/hjem", "/home"];
+  const navigationalKeywords = ["logg inn", "min side", "logg ut", "brukerstøtte"];
+
+  if (navigationalPaths.some((candidate) => normalizedPath.includes(candidate)) || navigationalKeywords.some((keyword) => textContext.includes(keyword))) {
+    return "navigational";
+  }
+
   return "informational";
 }
 
@@ -105,17 +123,86 @@ function isOnBrand(
   );
 }
 
+function uniqueValues(values: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(values.filter((value): value is string => Boolean(value))));
+}
+
+function resolvePageIdentifiers(pageUrl: string, targetUrl: string | null): {
+  absolutePageUrl: string | null;
+  path: string;
+  hostname: string | null;
+  absoluteCandidates: string[];
+  pathCandidates: string[];
+} {
+  const parse = (value: string): URL | null => {
+    try {
+      return new URL(value);
+    } catch {
+      return null;
+    }
+  };
+
+  const parsedPageUrl = parse(pageUrl);
+  const parsedTargetUrl = targetUrl ? parse(targetUrl) : null;
+  const resolved = parsedPageUrl ?? (parsedTargetUrl ? parse(pageUrl.startsWith("/") ? new URL(pageUrl, parsedTargetUrl).toString() : pageUrl) : null);
+  const path = resolved?.pathname ?? pageUrl;
+
+  return {
+    absolutePageUrl: resolved?.toString() ?? null,
+    path,
+    hostname: resolved?.hostname.replace(/^www\./, "") ?? parsedTargetUrl?.hostname.replace(/^www\./, "") ?? null,
+    absoluteCandidates: uniqueValues([resolved?.toString(), parsedPageUrl?.toString(), parsedTargetUrl ? new URL(path, parsedTargetUrl).toString() : null]),
+    pathCandidates: uniqueValues([path, pageUrl]),
+  };
+}
+
+function mergeCandidateUrls(
+  identifiers: ReturnType<typeof resolvePageIdentifiers>,
+  inferredAbsolutePageUrl: string | null,
+): ReturnType<typeof resolvePageIdentifiers> {
+  if (!inferredAbsolutePageUrl) {
+    return identifiers;
+  }
+
+  const parsed = (() => {
+    try {
+      return new URL(inferredAbsolutePageUrl);
+    } catch {
+      return null;
+    }
+  })();
+
+  if (!parsed) {
+    return identifiers;
+  }
+
+  return {
+    absolutePageUrl: identifiers.absolutePageUrl ?? parsed.toString(),
+    path: identifiers.path || parsed.pathname,
+    hostname: identifiers.hostname ?? parsed.hostname.replace(/^www\./, ""),
+    absoluteCandidates: uniqueValues([parsed.toString(), ...identifiers.absoluteCandidates]),
+    pathCandidates: uniqueValues([parsed.pathname, ...identifiers.pathCandidates]),
+  };
+}
+
 export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const pageUrl = searchParams.get("pageUrl");
   const domain = searchParams.get("domain");
+  const targetUrl = searchParams.get("targetUrl");
 
   if (!pageUrl || !domain) {
     return NextResponse.json({ error: "pageUrl and domain required" }, { status: 400 });
   }
 
-  const path = (() => { try { return new URL(pageUrl).pathname; } catch { return pageUrl; } })();
-  const hostname = (() => { try { return new URL(pageUrl).hostname.replace(/^www\./, ""); } catch { return domain; } })();
+  const initialIdentifiers = resolvePageIdentifiers(pageUrl, targetUrl);
+  const inferredAbsolutePageUrl =
+    !initialIdentifiers.absoluteCandidates.length && initialIdentifiers.path
+      ? findCanonicalPageUrl(domain, initialIdentifiers.path)
+      : null;
+  const identifiers = mergeCandidateUrls(initialIdentifiers, inferredAbsolutePageUrl);
+  const path = identifiers.path;
+  const hostname = identifiers.hostname ?? domain;
 
   // Brand words = words from the hostname (e.g. "sjoholmencafe" → ["sjoholmen", "cafe"] via splitting on the TLD)
   const brandRaw = hostname.split(".")[0]; // e.g. "sjoholmencafe"
@@ -132,21 +219,35 @@ export async function GET(request: NextRequest) {
   const brand = titleCase(brandRaw.replace(/(cafe|kafe|restaurant|bar|bistro|no)$/i, "").trim() || brandRaw);
   const intent = detectIntent(path);
 
+  const gscPageKey = identifiers.absoluteCandidates.find((candidate) => getTopQueriesForPage(domain, candidate, 28, 1).length > 0)
+    ?? identifiers.absoluteCandidates[0]
+    ?? pageUrl;
+  const pageContextKey = identifiers.absoluteCandidates.find((candidate) => {
+    const context = findLatestPageContext(candidate);
+    return context.page || context.suggestion;
+  }) ?? identifiers.absoluteCandidates[0] ?? pageUrl;
+
   // Get all queries for this page, then filter to on-brand only
-  const rawQueries = getTopQueriesForPage(domain, pageUrl, 28, 30);
+  const rawQueries = getTopQueriesForPage(domain, gscPageKey, 28, 30);
   const brandedQueries = rawQueries.filter((q) =>
     isOnBrand(q.query, brandWords, slugWords)
   );
 
-  const topQueries = brandedQueries.slice(0, 5);
+  const topQueries = (brandedQueries.length ? brandedQueries : rawQueries).slice(0, 5);
 
   // Use display name from domain param as brand (it's set by user e.g. "Sjøholmen")
   const displayBrand = titleCase(domain.split(/[\s-_]+/)[0]);
-  const { page, suggestion } = findLatestPageContext(pageUrl);
+  const { page, suggestion } = findLatestPageContext(pageContextKey);
   const searchIntent = detectSearchIntent(path, topQueries.map((item) => item.query).join(" "));
   const keyword = extractKeyword(path, page?.title ?? suggestion?.current.metaTitle, page?.h1 ?? suggestion?.current.h1);
-  const gscMetrics = getGscMetricsForPage(domain, pageUrl, 28);
-  const ga4Metrics = getGa4MetricsForPage(domain, pageUrl, 28);
+  const gscMetrics = identifiers.absoluteCandidates
+    .map((candidate) => getGscMetricsForPage(domain, candidate, 28))
+    .find((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate))
+    ?? null;
+  const ga4Metrics = identifiers.pathCandidates
+    .map((candidate) => getGa4MetricsForPage(domain, candidate, 28))
+    .find((candidate): candidate is NonNullable<typeof candidate> => Boolean(candidate))
+    ?? null;
   const metrics: PagePerformanceMetrics | null = gscMetrics || ga4Metrics
     ? {
         impressions: gscMetrics?.impressions ?? 0,
@@ -169,7 +270,7 @@ export async function GET(request: NextRequest) {
     metrics,
   });
 
-  const titles = buildAudienceAwareTitles(
+  const aidar = await generateAidarSuggestions(
     {
       page,
       domain,
@@ -178,35 +279,33 @@ export async function GET(request: NextRequest) {
       brand: displayBrand,
       queries: topQueries,
       metrics,
+      searchInsights,
     },
-    searchInsights,
-  );
-  const metaDescriptions = buildAudienceAwareDescriptions(
-    {
-      page,
-      domain,
-      intent: searchIntent,
-      keyword,
-      brand: displayBrand,
-      queries: topQueries,
-      metrics,
-    },
-    searchInsights,
   );
 
   return NextResponse.json({
-    pageUrl,
+    pageUrl: identifiers.absolutePageUrl ?? pageUrl,
+    slugLabel: path === "/" ? "forsiden" : path.replace(/^\/|\/$/g, ""),
     intent,
     brandWords: brandWords.slice(0, 5),
     slugWords,
-    topQueries: rawQueries.slice(0, 5),      // show all top queries for reference
-    brandedQueries: topQueries,               // only on-brand ones used for suggestions
+    topQueries: rawQueries.slice(0, 5),
+    brandedQueries: brandedQueries.slice(0, 5),
     audience: searchInsights?.audience ?? null,
+    performanceConclusions: searchInsights?.performanceConclusions ?? generatePerformanceInsights(metrics),
     contentHighlights: searchInsights?.contentHighlights ?? [],
-    contentGaps: searchInsights?.contentGaps ?? [],
+    contentGaps: unique([...(searchInsights?.contentGaps ?? []), ...aidar.contentRecommendations]).slice(0, 5),
+    agent: {
+      name: aidar.agentName,
+      mode: aidar.mode,
+      model: aidar.model,
+      notes: aidar.notes,
+    },
     suggestions: {
-      titles: titles.slice(0, 3),
-      metaDescriptions: metaDescriptions.slice(0, 2),
+      titles: aidar.titles.slice(0, 3),
+      metaDescriptions: aidar.metaDescriptions.slice(0, 2),
+      titleOptions: aidar.titleOptions.slice(0, 3),
+      metaDescriptionOptions: aidar.metaDescriptionOptions.slice(0, 2),
     },
   });
 }

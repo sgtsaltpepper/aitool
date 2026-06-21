@@ -34,6 +34,15 @@ For debugging med inspector:
 docker compose -f compose.debug.yaml up
 ```
 
+## Aidar metadata-agent
+
+Aidar kan forbedre metatitler og metabeskrivelser med OpenAI API når disse miljøvariablene er satt:
+
+- `OPENAI_API_KEY`
+- `OPENAI_METADATA_MODEL` (valgfri, standard: `gpt-4.1-mini`)
+
+Hvis nøkkelen mangler, bruker Aidar en lokal fallback med strengere norske regler og samme inputs fra sideinnhold, GSC og GA4.
+
 ## API
 
 | Metode | Endepunkt | Beskrivelse |

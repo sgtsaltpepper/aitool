@@ -40,6 +40,11 @@ export type SearchIntent =
   | "transactional"
   | "navigational";
 
+export type PageIntent = {
+  primary: SearchIntent;
+  secondary?: SearchIntent;
+};
+
 export type AuditMode = "domain" | "page";
 
 export type AuditRequestInput = {
@@ -235,15 +240,24 @@ export type PageSearchInsights = {
   primaryQuery: string | null;
   contentHighlights: string[];
   contentGaps: string[];
+  performanceConclusions?: string[];
   topQueries: SearchQueryInsight[];
   metrics: PagePerformanceMetrics | null;
+};
+
+export type MetadataAgent = {
+  name: string;
+  mode: "openai" | "fallback";
+  model: string | null;
+  notes: string[];
 };
 
 export type PageImprovementSuggestion = {
   url: string;
   pageTitle: string;
-  intent: SearchIntent;
+  intent: PageIntent;
   searchInsights: PageSearchInsights | null;
+  metadataAgent: MetadataAgent | null;
   current: {
     metaTitle: string;
     metaDescription: string;
@@ -268,8 +282,9 @@ export type PageImprovementSuggestion = {
 };
 
 export type PageAuditReport = {
-  intent: SearchIntent;
+  intent: PageIntent;
   searchInsights: PageSearchInsights | null;
+  metadataAgent: MetadataAgent | null;
   current: {
     url: string;
     title: string;
@@ -350,6 +365,56 @@ export type ImplementationPack = {
   }>;
   predictedImpact: PredictedImpact;
   evidence: string[];
+};
+
+export type AuditChangeSnapshot = {
+  url: string;
+  h1: string;
+  opening: string;
+  metaTitle: string;
+  metaDescription: string;
+  schemaTypes: string[];
+};
+
+export type AuditChangeTemplate = {
+  key: string;
+  sourceAuditRunId: string;
+  pageUrl: string;
+  changeType: "page-report" | "implementation-pack";
+  label: string;
+  summary: string;
+  baseline: AuditChangeSnapshot;
+  expected: AuditChangeSnapshot;
+};
+
+export type AuditChangeEvaluation = {
+  status: "awaiting-recheck" | "confirmed" | "not-detected";
+  checkedRunId: string | null;
+  checkedAt: string | null;
+  verifiedAt: string | null;
+  scoreDelta: number | null;
+  matchedFields: string[];
+  missingFields: string[];
+  observed: AuditChangeSnapshot | null;
+  summary: string;
+};
+
+export type AuditChangeLogEntry = {
+  id: string;
+  auditRunId: string;
+  targetUrl: string;
+  mode: AuditMode;
+  pageUrl: string;
+  changeType: "page-report" | "implementation-pack";
+  changeTitle: string;
+  changeSummary: string;
+  baseline: AuditChangeSnapshot;
+  expected: AuditChangeSnapshot;
+  notes: string;
+  appliedAt: string;
+  createdAt: string;
+  changedFields: string[];
+  evaluation: AuditChangeEvaluation;
 };
 
 export type TopicCluster = {
@@ -468,6 +533,7 @@ export type OpportunityPriority = 'critical' | 'high' | 'medium' | 'low';
 export interface Opportunity {
   id: number;
   snapshotId: number;
+  sortScore: number;
   domain: string;
   targetUrl: string;
   pageUrl: string;

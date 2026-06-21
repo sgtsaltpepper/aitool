@@ -1,4 +1,5 @@
 import { CATEGORY_LABELS, CATEGORY_WEIGHTS, PROVIDER_LABELS } from "@/lib/config";
+import { generateAidarSuggestions } from "@/lib/aidar";
 import { getGa4MetricsForPage, getGscMetricsForPage, getTopQueriesForPage } from "@/lib/db";
 import {
   buildAudienceAwareDescriptions,
@@ -18,6 +19,7 @@ import type {
   Issue,
   PageAuditReport,
   PageFaqSuggestion,
+  PageIntent,
   PageImprovementSuggestion,
   PagePerformanceMetrics,
   PageSectionSuggestion,
@@ -72,7 +74,7 @@ type BuildReportInput = {
   indexNowStatus: IndexNowStatus;
 };
 
-export function buildAuditReport(input: BuildReportInput): AuditReport {
+export async function buildAuditReport(input: BuildReportInput): Promise<AuditReport> {
   if (input.request.mode === "page") {
     return buildSinglePageAuditReport(input);
   }
@@ -83,7 +85,7 @@ export function buildAuditReport(input: BuildReportInput): AuditReport {
   const issues = buildIssues(metrics, categoryScores);
   const recommendations = buildRecommendations(issues, metrics);
   const providerScores = buildProviderScores(metrics);
-  const pageSuggestions = buildPageSuggestions(input.targetPages);
+  const pageSuggestions = await buildPageSuggestions(input.targetPages);
   const implementationPacks = buildImplementationPacks(
     input.request.mode,
     input.targetPages,
@@ -120,13 +122,13 @@ export function buildAuditReport(input: BuildReportInput): AuditReport {
   };
 }
 
-function buildSinglePageAuditReport(input: BuildReportInput): AuditReport {
+async function buildSinglePageAuditReport(input: BuildReportInput): Promise<AuditReport> {
   const metrics = buildDomainMetrics(input.targetPages, [], input.indexNowStatus);
   const categoryScores = buildCategoryScores(metrics);
   const issues = buildIssues(metrics, categoryScores);
   const recommendations = buildRecommendations(issues, metrics);
   const providerScores = buildProviderScores(metrics);
-  const pageSuggestions = buildPageSuggestions(input.targetPages);
+  const pageSuggestions = await buildPageSuggestions(input.targetPages);
   const implementationPacks = buildImplementationPacks(
     input.request.mode,
     input.targetPages,
@@ -913,16 +915,17 @@ function buildPageSummary(page: PageSnapshot | null, providerScores: ProviderSco
   return `Denne sideanalysen ser kun på ${humanPath(page.url)}. Siden har sterkest utgangspunkt mot ${strongestProvider.label.toLowerCase()}, og viktigste forbedringsområde er ${topIssue ? topIssue.title.toLowerCase() : "å spisse innhold og metadata ytterligere"}.`;
 }
 
-function buildPageSuggestions(pages: PageSnapshot[]): PageImprovementSuggestion[] {
-  return pages
-    .filter(
-      (page) =>
-        !page.blockedByRobots &&
-        !page.noindex &&
-        page.contentType?.includes("text/html") &&
-        (page.statusCode === null || page.statusCode < 400),
-    )
-    .map((page) => {
+async function buildPageSuggestions(pages: PageSnapshot[]): Promise<PageImprovementSuggestion[]> {
+  const suggestions = await Promise.all(
+    pages
+      .filter(
+        (page) =>
+          !page.blockedByRobots &&
+          !page.noindex &&
+          page.contentType?.includes("text/html") &&
+          (page.statusCode === null || page.statusCode < 400),
+      )
+      .map(async (page) => {
       const intent = classifyIntent(page);
       const pageTitle = page.h1 || page.title || humanPath(page.url);
       const keyword = extractKeyword(page);
@@ -952,11 +955,30 @@ function buildPageSuggestions(pages: PageSnapshot[]): PageImprovementSuggestion[
         queries,
         metrics: performanceMetrics,
       });
+      const aidar = await generateAidarSuggestions({
+        page: {
+          url: page.url,
+          title: page.title,
+          metaDescription: page.metaDescription,
+          h1: page.h1,
+          headings: page.headings,
+          firstParagraph: page.firstParagraph,
+          bodyText: page.bodyText,
+          hasContactLink: page.hasContactLink,
+        },
+        domain,
+        intent,
+        keyword,
+        brand,
+        queries,
+        searchInsights,
+        metrics: performanceMetrics,
+      });
       // Keep focus for backward-compat with functions not yet updated
       const focus = keyword;
       const structure = proposeStructure(page, intent);
-      const metaTitle = proposeMetaTitle(page, keyword, brand, intent, searchInsights);
-      const metaDescription = proposeMetaDescription(page, keyword, brand, intent, searchInsights);
+      const metaTitle = aidar.titles[0] ?? proposeMetaTitle(page, keyword, brand, intent, searchInsights);
+      const metaDescription = aidar.metaDescriptions[0] ?? proposeMetaDescription(page, keyword, brand, intent, searchInsights);
       const contentLead = proposeContentLead(page, keyword, brand, intent);
       const contentNotes = proposeContentNotes(
         page,
@@ -980,6 +1002,12 @@ function buildPageSuggestions(pages: PageSnapshot[]): PageImprovementSuggestion[
         pageTitle,
         intent,
         searchInsights,
+        metadataAgent: {
+          name: aidar.agentName,
+          mode: aidar.mode,
+          model: aidar.model,
+          notes: aidar.notes,
+        },
         current: {
           metaTitle: page.title,
           metaDescription: page.metaDescription,
@@ -991,7 +1019,7 @@ function buildPageSuggestions(pages: PageSnapshot[]): PageImprovementSuggestion[
           structure,
           h1: proposedH1,
           contentLead,
-          contentNotes,
+          contentNotes: unique([...contentNotes, ...aidar.contentRecommendations]).slice(0, 5),
           sections,
           faq,
           cta,
@@ -1002,7 +1030,10 @@ function buildPageSuggestions(pages: PageSnapshot[]): PageImprovementSuggestion[
         },
         rationale,
       };
-    })
+    }),
+  );
+
+  return suggestions
     .sort((left, right) => {
       const leftNeed = suggestionNeedScore(left);
       const rightNeed = suggestionNeedScore(right);
@@ -1085,7 +1116,7 @@ export function buildTopicClusters(pages: PageSnapshot[]): TopicCluster[] {
 
     const topTokens = summarizeTopTokens(group.map((item) => item.tokens));
     const name = topTokens.length ? topTokens.join(" / ") : seed.page.h1 || seed.page.title || humanPath(seed.page.url);
-    const intent = majorityIntent(group.map((item) => classifyIntent(item.page)));
+    const intent = majorityIntent(group.map((item) => primaryIntent(classifyIntent(item.page))));
     const averageSimilarity = average(
       group.flatMap((item, index) =>
         group
@@ -1116,20 +1147,92 @@ export function buildTopicClusters(pages: PageSnapshot[]): TopicCluster[] {
   return clusters.sort((a, b) => b.pages.length - a.pages.length || b.score - a.score);
 }
 
-function classifyIntent(page: PageSnapshot): SearchIntent {
-  const haystack = `${page.path} ${page.title} ${page.h1} ${page.metaDescription}`.toLowerCase();
+function primaryIntent(intent: SearchIntent | PageIntent): SearchIntent {
+  return typeof intent === "string" ? intent : intent.primary;
+}
 
-  if (/(buy|pricing|price|bestill|kjøp|kontakt salg|demo|book|start now|registrer)/i.test(haystack)) {
-    return "transactional";
-  }
-  if (/(vs|compare|comparison|alternatives|beste|review|top|why us|case study)/i.test(haystack)) {
-    return "commercial investigation";
-  }
-  if (/(login|signin|logg inn|dashboard|account|konto|home)/i.test(haystack)) {
-    return "navigational";
+function intentIncludes(intent: SearchIntent | PageIntent, candidate: SearchIntent): boolean {
+  return primaryIntent(intent) === candidate || (typeof intent !== "string" && intent.secondary === candidate);
+}
+
+function classifyIntent(page: PageSnapshot): PageIntent {
+  const path = page.path.toLowerCase();
+  const cleanPath = path === "/" || path === "" || path === "/index.html";
+  const textContext = `${page.title} ${page.h1} ${page.metaDescription}`.toLowerCase();
+
+  if (cleanPath) {
+    const hasTransactionalSignals = ["bestill", "book", "meny", "kjøp", "booking", "reserver"].some((keyword) =>
+      textContext.includes(keyword),
+    );
+
+    return {
+      primary: "informational",
+      secondary: hasTransactionalSignals ? "transactional" : "commercial investigation",
+    };
   }
 
-  return "informational";
+  const transactionalPaths = [
+    "/meny",
+    "/booking",
+    "/bestill",
+    "/kontakt",
+    "/handlekurv",
+    "/kasse",
+    "/checkout",
+    "/reserver",
+    "/tilbud",
+    "/shop",
+  ];
+  const transactionalKeywords = [
+    "kjøp",
+    "bestill",
+    "book",
+    "reserver",
+    "meny",
+    "kontakt oss",
+    "add to cart",
+    "prisliste",
+  ];
+
+  if (transactionalPaths.some((candidate) => path.includes(candidate)) || transactionalKeywords.some((keyword) => textContext.includes(keyword))) {
+    const secondary = /(hva|hvordan|guide|historie|om\b|faq|spørsmål)/i.test(textContext) ? "informational" : undefined;
+    return { primary: "transactional", secondary };
+  }
+
+  const commercialPaths = [
+    "/priser",
+    "/pakker",
+    "/selskapslokale",
+    "/tjenester",
+    "/produkter",
+    "/løsninger",
+    "/referanser",
+    "/casestudies",
+  ];
+  const commercialKeywords = [
+    "beste",
+    "test",
+    "pris",
+    "sammenlign",
+    "erfaringer",
+    "anmeldelser",
+    "vs",
+    "vs.",
+    "hvilken bør jeg velge",
+  ];
+
+  if (commercialPaths.some((candidate) => path.includes(candidate)) || commercialKeywords.some((keyword) => textContext.includes(keyword))) {
+    return { primary: "commercial investigation" };
+  }
+
+  const navigationalPaths = ["/logg-inn", "/login", "/minside", "/dashboard", "/konto", "/hjem", "/home"];
+  const navigationalKeywords = ["logg inn", "min side", "logg ut", "brukerstøtte"];
+
+  if (navigationalPaths.some((candidate) => path.includes(candidate)) || navigationalKeywords.some((keyword) => textContext.includes(keyword))) {
+    return { primary: "navigational" };
+  }
+
+  return { primary: "informational" };
 }
 
 /**
@@ -1218,56 +1321,56 @@ function pickFocusPhrase(page: PageSnapshot): string {
   return extractKeyword(page);
 }
 
-function proposeH1(page: PageSnapshot, keyword: string, brand: string, intent: SearchIntent): string {
+function proposeH1(page: PageSnapshot, keyword: string, brand: string, intent: SearchIntent | PageIntent): string {
   // Keep existing H1 if it's already well-formed
   if (page.h1 && page.h1.length >= 10 && page.h1.length <= 70) {
     return page.h1;
   }
 
-  if (intent === "transactional") {
+  if (intentIncludes(intent, "transactional")) {
     return `${keyword} – priser, booking og praktisk info`;
   }
-  if (intent === "commercial investigation") {
+  if (intentIncludes(intent, "commercial investigation")) {
     return `${keyword} – sammenlign, vurder og velg riktig`;
   }
 
   return `${keyword} – komplett guide med fakta og vanlige spørsmål`;
 }
 
-function proposeStructure(page: PageSnapshot, intent: SearchIntent): string[] {
+function proposeStructure(page: PageSnapshot, intent: SearchIntent | PageIntent): string[] {
   const structure = [
     "Kort svar rett under H1",
     "Hovedpoeng eller nøkkelfordeler i punktliste",
     "Utdypende forklaring med konkrete eksempler",
   ];
 
-  if (intent === "commercial investigation") {
+  if (intentIncludes(intent, "commercial investigation")) {
     structure.push("Sammenligning av alternativer eller kriterier");
   }
-  if (intent === "transactional") {
+  if (intentIncludes(intent, "transactional")) {
     structure.push("Praktisk neste steg med tydelig CTA");
   }
-  if (page.tableCount === 0 && intent !== "navigational") {
+  if (page.tableCount === 0 && !intentIncludes(intent, "navigational")) {
     structure.push("Tabell eller faktaboks for raske svar");
   }
   if (!page.answerFirstSignals.hasFaq) {
     structure.push("FAQ med 3-5 spørsmål");
   }
-  if (!page.hasContactLink && intent !== "informational") {
+  if (!page.hasContactLink && !intentIncludes(intent, "informational")) {
     structure.push("Kontakt eller bestillingsinformasjon");
   }
 
   return unique(structure);
 }
 
-function proposeContentLead(page: PageSnapshot, keyword: string, brand: string, intent: SearchIntent): string {
+function proposeContentLead(page: PageSnapshot, keyword: string, brand: string, intent: SearchIntent | PageIntent): string {
   const kw = keyword.toLowerCase();
   const br = brand;
 
-  if (intent === "transactional") {
+  if (intentIncludes(intent, "transactional")) {
     return `${br} tilbyr ${kw} til bedriftsarrangementer, selskapsfester og private tilstelninger. Fyll ut kontaktskjemaet nedenfor for å motta et uforpliktende pristilbud.`;
   }
-  if (intent === "commercial investigation") {
+  if (intentIncludes(intent, "commercial investigation")) {
     return `${kw} fra ${br} – se hva som er inkludert, hvilke alternativer som finnes og hva som skiller dem fra hverandre.`;
   }
 
@@ -1283,7 +1386,7 @@ function proposeContentLead(page: PageSnapshot, keyword: string, brand: string, 
 
 function proposeContentNotes(
   page: PageSnapshot,
-  intent: SearchIntent,
+  intent: SearchIntent | PageIntent,
   keyword: string,
   brand: string,
   proposedTitle: string,
@@ -1309,7 +1412,7 @@ function proposeContentNotes(
   if (!page.answerFirstSignals.hasFaq) {
     notes.push(`Legg til FAQ med spørsmål som «Hva koster ${kw}?», «Hvordan bestiller jeg ${kw}?» og «Passer ${kw} for mitt arrangement?»`);
   }
-  if (page.wordCount < 500 && intent !== "navigational") {
+  if (page.wordCount < 500 && !intentIncludes(intent, "navigational")) {
     notes.push(`Siden har ${page.wordCount} ord – utvid med konkrete eksempler, priser og casebeskrivelser.`);
   }
   if (!page.author && !page.publisher) {
@@ -1329,7 +1432,7 @@ function proposeSections(
   page: PageSnapshot,
   keyword: string,
   brand: string,
-  intent: SearchIntent,
+  intent: SearchIntent | PageIntent,
 ): PageSectionSuggestion[] {
   const kw = keyword.toLowerCase();
   const sections: PageSectionSuggestion[] = [
@@ -1350,7 +1453,7 @@ function proposeSections(
     },
   ];
 
-  if (intent === "transactional") {
+  if (intentIncludes(intent, "transactional")) {
     sections.push({
       title: "Pris og praktisk info",
       purpose: "De fleste forlater siden fordi de ikke finner prisinformasjon – gi dem et prisanslag.",
@@ -1375,11 +1478,11 @@ function proposeSections(
   return sections;
 }
 
-function proposeFaq(keyword: string, brand: string, intent: SearchIntent): PageFaqSuggestion[] {
+function proposeFaq(keyword: string, brand: string, intent: SearchIntent | PageIntent): PageFaqSuggestion[] {
   const kw = keyword.toLowerCase();
 
   const bookingAnswer =
-    intent === "transactional"
+    intentIncludes(intent, "transactional")
       ? `Ta kontakt med ${brand} via kontaktskjema eller telefon. Oppgi ønsket dato, sted og antall gjester, så sender vi et uforpliktende tilbud.`
       : `Ta kontakt med ${brand} for å diskutere behov og tilgjengelighet.`;
 
@@ -1403,12 +1506,12 @@ function proposeFaq(keyword: string, brand: string, intent: SearchIntent): PageF
   ];
 }
 
-function proposeCta(keyword: string, intent: SearchIntent): string {
+function proposeCta(keyword: string, intent: SearchIntent | PageIntent): string {
   const kw = keyword.toLowerCase();
-  if (intent === "transactional") {
+  if (intentIncludes(intent, "transactional")) {
     return `Be om pris på ${kw} – fyll ut skjemaet og motta tilbud innen [X] virkedager.`;
   }
-  if (intent === "commercial investigation") {
+  if (intentIncludes(intent, "commercial investigation")) {
     return `Sammenlign alternativer eller ta kontakt for en uforpliktende prat om ${kw}.`;
   }
   return `Har du spørsmål om ${kw}? Ta kontakt – vi svarer raskt.`;
@@ -1418,7 +1521,7 @@ function proposeMetaTitle(
   page: PageSnapshot,
   keyword: string,
   brand: string,
-  intent: SearchIntent,
+  intent: SearchIntent | PageIntent,
   searchInsights: PageImprovementSuggestion["searchInsights"],
 ): string {
   const suggestion = buildAudienceAwareTitles(
@@ -1441,7 +1544,7 @@ function proposeMetaDescription(
   page: PageSnapshot,
   keyword: string,
   brand: string,
-  intent: SearchIntent,
+  intent: SearchIntent | PageIntent,
   searchInsights: PageImprovementSuggestion["searchInsights"],
 ): string {
   const suggestion = buildAudienceAwareDescriptions(
@@ -1463,7 +1566,7 @@ function proposeMetaDescription(
 function proposeSchema(
   page: PageSnapshot,
   focus: string,
-  intent: SearchIntent,
+  intent: SearchIntent | PageIntent,
   metaDescription: string,
 ): { schemaType: string; jsonLd: string } {
   const primaryType = pickPrimarySchemaType(page, intent);
@@ -1525,8 +1628,8 @@ function proposeSchema(
   };
 }
 
-function pickPrimarySchemaType(page: PageSnapshot, intent: SearchIntent): string {
-  if (intent === "transactional") {
+function pickPrimarySchemaType(page: PageSnapshot, intent: SearchIntent | PageIntent): string {
+  if (intentIncludes(intent, "transactional")) {
     return "Service";
   }
   if (page.author || page.datePublished || page.wordCount >= 700) {
@@ -1604,6 +1707,7 @@ function buildPageReport(
   return {
     intent: suggestion.intent,
     searchInsights: suggestion.searchInsights,
+    metadataAgent: suggestion.metadataAgent,
     current: {
       url: page.url,
       title: page.title,

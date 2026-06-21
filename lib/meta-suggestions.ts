@@ -1,10 +1,12 @@
 import type {
+  PageIntent,
   PagePerformanceMetrics,
   PageSearchInsights,
   PageSnapshot,
   SearchIntent,
   SearchQueryInsight,
 } from "@/lib/types";
+import { generatePerformanceInsights } from "@/lib/performance-insights";
 import { extractTextTokens, humanPath, unique } from "@/lib/utils";
 
 type QueryStat = {
@@ -28,7 +30,7 @@ type MinimalPage = Pick<
 export type MetaSuggestionInput = {
   page: MinimalPage | null;
   domain: string;
-  intent: SearchIntent;
+  intent: SearchIntent | PageIntent;
   keyword: string;
   brand: string;
   queries: QueryStat[];
@@ -85,6 +87,15 @@ function titleCase(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
 }
 
+function normalizeForSearch(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[^\p{L}\p{N}\s-]/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 function chooseVisibleKeyword(primary: string, alternatives: string[]): string {
   const normalizedPrimary = extractTextTokens(primary).join(" ");
 
@@ -133,6 +144,22 @@ function extractBrandTokens(brand: string, domain: string): string[] {
   );
 }
 
+function safeHumanPath(domain: string): string {
+  try {
+    return humanPath(`https://${domain}/`);
+  } catch {
+    return domain.replace(/\s+/g, " ").trim();
+  }
+}
+
+function primaryIntent(intent: SearchIntent | PageIntent): SearchIntent {
+  return typeof intent === "string" ? intent : intent.primary;
+}
+
+function intentIncludes(intent: SearchIntent | PageIntent, candidate: SearchIntent): boolean {
+  return primaryIntent(intent) === candidate || (typeof intent !== "string" && intent.secondary === candidate);
+}
+
 function detectContentHighlights(page: MinimalPage | null): string[] {
   if (!page) {
     return [];
@@ -155,7 +182,7 @@ function detectContentHighlights(page: MinimalPage | null): string[] {
   );
 }
 
-function detectAudience(intent: SearchIntent, queries: QueryStat[], highlights: string[]): AudienceProfile | null {
+function detectAudience(intent: SearchIntent | PageIntent, queries: QueryStat[], highlights: string[]): AudienceProfile | null {
   const haystack = `${queries.map((item) => item.query).join(" ")} ${highlights.join(" ")}`;
   for (const rule of AUDIENCE_PATTERNS) {
     if (rule.pattern.test(haystack)) {
@@ -163,13 +190,13 @@ function detectAudience(intent: SearchIntent, queries: QueryStat[], highlights: 
     }
   }
 
-  if (intent === "transactional") {
+  if (intentIncludes(intent, "transactional")) {
     return { audience: "brukere som er klare for å ta neste steg", qualifier: "med tydelig neste steg" };
   }
-  if (intent === "commercial investigation") {
+  if (intentIncludes(intent, "commercial investigation")) {
     return { audience: "brukere som sammenligner alternativer", qualifier: "for brukere som sammenligner" };
   }
-  if (intent === "informational") {
+  if (intentIncludes(intent, "informational")) {
     return { audience: "brukere som vil forstå temaet", qualifier: "forklart enkelt" };
   }
 
@@ -178,14 +205,21 @@ function detectAudience(intent: SearchIntent, queries: QueryStat[], highlights: 
 
 function buildQueryInsights(
   queries: QueryStat[],
+  contentText: string,
   contentTokens: Set<string>,
   brandTokens: string[],
 ): SearchQueryInsight[] {
+  const normalizedContent = normalizeForSearch(contentText);
+
   return queries.slice(0, 5).map((item) => {
+    const normalizedQuery = normalizeForSearch(item.query);
+    const directPhrasePresent = normalizedQuery.length >= 2 && normalizedContent.includes(normalizedQuery);
     const queryTokens = extractTextTokens(item.query).filter((token) => !brandTokens.includes(token));
     const matchedTerms = unique(queryTokens.filter((token) => contentTokens.has(token)));
     const missingTerms = unique(queryTokens.filter((token) => !contentTokens.has(token)));
-    const inContent = matchedTerms.length >= Math.max(1, Math.ceil(queryTokens.length / 2));
+    const inContent = queryTokens.length === 0
+      ? directPhrasePresent
+      : directPhrasePresent || matchedTerms.length >= Math.max(1, Math.ceil(queryTokens.length / 2));
 
     return {
       query: item.query,
@@ -218,10 +252,12 @@ function buildContentGapRecommendations(
   insights: PageSearchInsights,
 ): string[] {
   const recommendations: string[] = [];
+  const querySectionRecommendation = (query: string) =>
+    `Legg inn en egen seksjon som svarer tydelig på «${query}», siden dette søket får visninger uten å være godt nok dekket i innholdet.`;
 
   for (const query of insights.topQueries) {
     if (!query.inContent && query.impressions >= 20) {
-      recommendations.push(`Legg inn en egen seksjon som svarer tydelig på «${query.query}», siden dette søket får visninger uten å være godt nok dekket i innholdet.`);
+      recommendations.push(querySectionRecommendation(query.query));
     }
     if (query.missingTerms.some((term) => /pris|priser|kostnad/i.test(term))) {
       recommendations.push("Vis prisnivå eller forklar hva som påvirker prisen, slik at siden matcher prisrelaterte søk bedre.");
@@ -231,10 +267,25 @@ function buildContentGapRecommendations(
     }
   }
 
+  if (recommendations.length < 4) {
+    for (const query of insights.topQueries) {
+      if (query.impressions < 50) {
+        continue;
+      }
+      const candidate = querySectionRecommendation(query.query);
+      if (!recommendations.includes(candidate)) {
+        recommendations.push(candidate);
+      }
+      if (recommendations.length >= 4) {
+        break;
+      }
+    }
+  }
+
   if (input.metrics && input.metrics.impressions >= 300 && input.metrics.ctr < 0.03) {
     recommendations.push("Spiss åpningen med hvem siden er for, hva brukeren får og hvorfor siden er relevant, slik at søkeresultatet blir mer klikkverdig.");
   }
-  if (input.metrics && input.metrics.sessions >= 100 && input.metrics.conversionRate < 0.01 && input.intent !== "informational") {
+  if (input.metrics && input.metrics.sessions >= 100 && input.metrics.conversionRate < 0.01 && !intentIncludes(input.intent, "informational")) {
     recommendations.push("Flytt CTA høyere opp og gjør neste steg synlig i innholdet, siden siden får trafikk uten å konvertere godt nok.");
   }
   if (input.page && !input.page.answerFirstSignals.hasFaq && input.queries.some((item) => /\?|hvordan|hva|kan|når/i.test(item.query))) {
@@ -247,12 +298,12 @@ function buildContentGapRecommendations(
 export function buildPageSearchInsights(input: MetaSuggestionInput): PageSearchInsights | null {
   const contentText = input.page
     ? [input.page.title, input.page.h1, input.page.headings.join(" "), input.page.firstParagraph, input.page.bodyText.slice(0, 800)].join(" ")
-    : `${input.keyword} ${humanPath(`https://${input.domain}/`)}`;
+    : `${input.keyword} ${safeHumanPath(input.domain)}`;
   const contentTokens = new Set(extractTextTokens(contentText));
   const brandTokens = extractBrandTokens(input.brand, input.domain);
   const contentHighlights = detectContentHighlights(input.page);
   const audienceProfile = detectAudience(input.intent, input.queries, contentHighlights);
-  const topQueries = buildQueryInsights(input.queries, contentTokens, brandTokens);
+  const topQueries = buildQueryInsights(input.queries, contentText, contentTokens, brandTokens);
 
   return {
     audience: audienceProfile?.audience ?? null,
@@ -265,9 +316,11 @@ export function buildPageSearchInsights(input: MetaSuggestionInput): PageSearchI
       primaryQuery: topQueries[0]?.query ?? null,
       contentHighlights,
       contentGaps: [],
+      performanceConclusions: [],
       topQueries,
       metrics: input.metrics,
     }),
+    performanceConclusions: generatePerformanceInsights(input.metrics),
     topQueries,
     metrics: input.metrics,
   };
@@ -283,7 +336,7 @@ export function buildAudienceAwareTitles(input: MetaSuggestionInput, insights: P
   );
 
   const candidates = [
-    input.intent === "transactional"
+    intentIncludes(input.intent, "transactional")
       ? `${visibleKeyword} ${qualifier ?? "med priser og bestilling"} | ${input.brand}`
       : `${visibleKeyword} ${qualifier ?? ""} | ${input.brand}`.replace(/\s+\|/, " |"),
     modifier
@@ -306,9 +359,9 @@ export function buildAudienceAwareDescriptions(input: MetaSuggestionInput, insig
     [input.page?.h1 ?? "", input.page?.title ?? "", insights?.primaryQuery ?? ""],
   );
   const queryIntro = `Leter du etter ${visibleKeyword.toLowerCase()}? `;
-  const action = input.intent === "transactional"
+  const action = intentIncludes(input.intent, "transactional")
     ? (input.page?.hasContactLink ? "Ta neste steg og kontakt oss." : "Se hvordan du går videre.")
-    : input.intent === "commercial investigation"
+    : intentIncludes(input.intent, "commercial investigation")
       ? "Finn ut om dette passer for ditt behov."
       : "Få et raskt overblikk før du går videre.";
 

@@ -2,11 +2,12 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 
 import { AutoRefresh } from "@/components/AutoRefresh";
+import { AuditChangeTracker } from "@/components/AuditChangeTracker";
 import { ScorePill, StatusPill } from "@/components/Badges";
 import { SyncButton } from "@/app/integrations/SyncButton";
 import { CATEGORY_LABELS, PROVIDER_LABELS } from "@/lib/config";
-import { getAuditReport, getAuditRun, getGoogleConnection, listAuditRuns, listDomainIntegrations } from "@/lib/db";
-import type { AuditReport, ImplementationPack, Issue, Recommendation } from "@/lib/types";
+import { getAuditReport, getAuditRun, getGoogleConnection, listAuditChangeEvents, listAuditRuns, listDomainIntegrations } from "@/lib/db";
+import type { AuditChangeSnapshot, AuditChangeTemplate, AuditReport, ImplementationPack, Issue, PageIntent, Recommendation, SearchIntent } from "@/lib/types";
 import { humanPath, readableExcerpt, summarizeList } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
@@ -24,6 +25,8 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
   }
 
   const report = run.status === "completed" ? getAuditReport(id) : null;
+  const changeTemplates = report ? buildAuditChangeTemplates(report) : [];
+  const changeEntries = listAuditChangeEvents(run.targetUrl, run.request.mode);
   const history = listAuditRuns(20).filter(
     (entry) => entry.targetUrl === run.targetUrl && entry.request.mode === run.request.mode,
   );
@@ -176,6 +179,18 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
                   ))}
                 </ul>
               </div>
+              {report.pageReport.searchInsights?.performanceConclusions?.length ? (
+                <div className="card">
+                  <h3>Det systemet reagerte på</h3>
+                  <ul className="list">
+                    {report.pageReport.searchInsights.performanceConclusions?.map((item) => (
+                      <li key={item}>
+                        <p>{item}</p>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : null}
             </div>
           </section>
 
@@ -290,6 +305,16 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
                 </ul>
               </article>
             </div>
+            {report.pageReport.metadataAgent ? (
+              <p className="muted" style={{ marginTop: "0.75rem" }}>
+                Metadata generert av <strong>{report.pageReport.metadataAgent.name}</strong>
+                {report.pageReport.metadataAgent.mode === "openai"
+                  ? report.pageReport.metadataAgent.model
+                    ? ` via ${report.pageReport.metadataAgent.model}`
+                    : " via AI"
+                  : " med lokal fallback"}
+              </p>
+            ) : null}
             {report.pageReport.searchInsights ? (
               <article className="recommendation">
                 <h3>Søkeinnsikt bak forslaget</h3>
@@ -383,6 +408,16 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
                 </article>
               ))}
             </div>
+          </section>
+
+          <section className="history-panel">
+            <AuditChangeTracker
+              auditRunId={run.id}
+              targetUrl={run.targetUrl}
+              mode={run.request.mode}
+              templates={changeTemplates}
+              entries={changeEntries}
+            />
           </section>
 
           <section className="history-panel">
@@ -687,6 +722,16 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
           </section>
 
           <section className="history-panel">
+            <AuditChangeTracker
+              auditRunId={run.id}
+              targetUrl={run.targetUrl}
+              mode={run.request.mode}
+              templates={changeTemplates}
+              entries={changeEntries}
+            />
+          </section>
+
+          <section className="history-panel">
             <div className="section-header">
               <h2>Historikk</h2>
               <p>Tidligere kjøringer for samme domene.</p>
@@ -740,6 +785,84 @@ async function AuditReportPageInner({ params }: { params: Promise<{ id: string }
       )}
     </>
   );
+}
+
+function buildChangeSnapshot(input: {
+  url: string;
+  h1: string;
+  opening: string;
+  metaTitle: string;
+  metaDescription: string;
+  schemaTypes: string[];
+}): AuditChangeSnapshot {
+  return {
+    url: input.url,
+    h1: input.h1,
+    opening: input.opening,
+    metaTitle: input.metaTitle,
+    metaDescription: input.metaDescription,
+    schemaTypes: input.schemaTypes,
+  };
+}
+
+function buildAuditChangeTemplates(report: AuditReport): AuditChangeTemplate[] {
+  const templates: AuditChangeTemplate[] = [];
+
+  if (report.pageReport) {
+    templates.push({
+      key: `${report.runId}:page-report`,
+      sourceAuditRunId: report.runId,
+      pageUrl: report.pageReport.current.url,
+      changeType: "page-report",
+      label: "Sideforslag fra rapporten",
+      summary: "Logger H1, åpning, metadata og schema fra sideforslaget som en faktisk publisert endring.",
+      baseline: buildChangeSnapshot({
+        url: report.pageReport.current.url,
+        h1: report.pageReport.current.h1,
+        opening: report.pageReport.current.opening,
+        metaTitle: report.pageReport.current.metaTitle,
+        metaDescription: report.pageReport.current.metaDescription,
+        schemaTypes: report.pageReport.current.schemaTypes,
+      }),
+      expected: buildChangeSnapshot({
+        url: report.pageReport.current.url,
+        h1: report.pageReport.proposed.h1,
+        opening: report.pageReport.proposed.opening,
+        metaTitle: report.pageReport.proposed.metaTitle,
+        metaDescription: report.pageReport.proposed.metaDescription,
+        schemaTypes: [report.pageReport.proposed.schemaType],
+      }),
+    });
+  }
+
+  report.implementationPacks.forEach((pack, index) => {
+    templates.push({
+      key: `${report.runId}:pack:${index}`,
+      sourceAuditRunId: report.runId,
+      pageUrl: pack.url,
+      changeType: "implementation-pack",
+      label: `Implementation Pack: ${pack.pageTitle}`,
+      summary: `Logger implementation pack for ${humanPath(pack.url)} og følger om feltene faktisk blir synlige i senere audits.`,
+      baseline: buildChangeSnapshot({
+        url: pack.url,
+        h1: pack.currentSnapshot.h1,
+        opening: pack.currentSnapshot.opening,
+        metaTitle: pack.currentSnapshot.metaTitle,
+        metaDescription: pack.currentSnapshot.metaDescription,
+        schemaTypes: pack.currentSnapshot.schemaTypes,
+      }),
+      expected: buildChangeSnapshot({
+        url: pack.url,
+        h1: pack.proposedSnapshot.h1,
+        opening: pack.proposedSnapshot.opening,
+        metaTitle: pack.proposedSnapshot.metaTitle,
+        metaDescription: pack.proposedSnapshot.metaDescription,
+        schemaTypes: [pack.proposedSnapshot.schemaType],
+      }),
+    });
+  });
+
+  return templates;
 }
 
 function phaseLabel(phase: string) {
@@ -804,7 +927,7 @@ function renderingLabel(model: string) {
   }
 }
 
-function intentLabel(intent: string) {
+function singleIntentLabel(intent: SearchIntent) {
   switch (intent) {
     case "informational":
       return "Informasjonssøk";
@@ -817,6 +940,18 @@ function intentLabel(intent: string) {
     default:
       return intent;
   }
+}
+
+function intentLabel(intent: SearchIntent | PageIntent) {
+  if (typeof intent === "string") {
+    return singleIntentLabel(intent);
+  }
+
+  if (intent.secondary) {
+    return `${singleIntentLabel(intent.primary)} + ${singleIntentLabel(intent.secondary)}`;
+  }
+
+  return singleIntentLabel(intent.primary);
 }
 
 function answerScoreLabel(score: number) {
@@ -934,6 +1069,19 @@ function PageSuggestionCard({ suggestion }: { suggestion: AuditReport["pageSugge
       </div>
       <p>{suggestion.proposed.contentLead}</p>
       <ul className="list">
+        {suggestion.metadataAgent ? (
+          <li>
+            <strong>Metadata-agent</strong>
+            <p>
+              {suggestion.metadataAgent.name}
+              {suggestion.metadataAgent.mode === "openai"
+                ? suggestion.metadataAgent.model
+                  ? ` via ${suggestion.metadataAgent.model}`
+                  : " via AI"
+                : " med lokal fallback"}
+            </p>
+          </li>
+        ) : null}
         {suggestion.searchInsights?.audience ? (
           <li>
             <strong>Målgruppe i søket</strong>

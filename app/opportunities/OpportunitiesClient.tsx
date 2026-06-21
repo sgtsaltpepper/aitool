@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import type { Opportunity, DomainIntegration } from "@/lib/types";
+import type { Opportunity, DomainIntegration, OpportunitySnapshot } from "@/lib/types";
 
 const PRIORITY_COLORS: Record<string, string> = {
   critical: "#dc2626",
@@ -22,13 +22,38 @@ const TYPE_LABELS: Record<string, string> = {
 type Suggestions = {
   titles: string[];
   metaDescriptions: string[];
+  titleOptions?: { text: string; score: number; reasons: string[] }[];
+  metaDescriptionOptions?: { text: string; score: number; reasons: string[] }[];
   topQueries: { query: string; impressions: number; clicks: number; position: number }[];
   intent?: string;
   slugLabel?: string;
   audience?: string | null;
+  performanceConclusions?: string[];
   contentHighlights?: string[];
   contentGaps?: string[];
+  agent?: {
+    name: string;
+    mode: "openai" | "fallback";
+    model: string | null;
+    notes: string[];
+  };
 } | null;
+
+function resolveOpportunityUrl(domain: string, pageUrl: string): { href: string; label: string } {
+  const raw = pageUrl?.trim() || "/";
+
+  try {
+    const absolute = new URL(raw);
+    const label = absolute.pathname === "/" ? absolute.hostname : `${absolute.hostname}${absolute.pathname}`;
+    return { href: absolute.toString(), label };
+  } catch {
+    const pathname = raw.startsWith("/") ? raw : `/${raw}`;
+    return {
+      href: `https://${domain}${pathname}`,
+      label: pathname === "/" ? domain : `${domain}${pathname}`,
+    };
+  }
+}
 
 function OpportunityCard({
   opp,
@@ -43,34 +68,56 @@ function OpportunityCard({
   const [loadingSuggestions, setLoadingSuggestions] = useState(false);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [statusLoading, setStatusLoading] = useState(false);
+  const [suggestionsError, setSuggestionsError] = useState<string | null>(null);
+  const resolvedUrl = resolveOpportunityUrl(domain, opp.pageUrl);
 
   async function loadSuggestions() {
-    if (suggestions) { setShowSuggestions(!showSuggestions); return; }
+    if (suggestions) {
+      setSuggestionsError(null);
+      setShowSuggestions(!showSuggestions);
+      return;
+    }
+
     setLoadingSuggestions(true);
     try {
       const res = await fetch(
-        `/api/opportunities/suggestions?pageUrl=${encodeURIComponent(opp.pageUrl)}&domain=${encodeURIComponent(domain)}`,
+        `/api/opportunities/suggestions?pageUrl=${encodeURIComponent(opp.pageUrl)}&domain=${encodeURIComponent(domain)}&targetUrl=${encodeURIComponent(opp.targetUrl)}`,
       );
+      if (!res.ok) {
+        throw new Error("Kunne ikke hente konkrete forslag akkurat nå.");
+      }
       type SuggestionsResponse = {
-        suggestions: { titles: string[]; metaDescriptions: string[] };
+        suggestions: {
+          titles: string[];
+          metaDescriptions: string[];
+          titleOptions?: { text: string; score: number; reasons: string[] }[];
+          metaDescriptionOptions?: { text: string; score: number; reasons: string[] }[];
+        };
         topQueries: NonNullable<Suggestions>["topQueries"];
         audience?: string | null;
+        performanceConclusions?: string[];
         contentHighlights?: string[];
         contentGaps?: string[];
+        agent?: NonNullable<Suggestions>["agent"];
       };
       const data = await res.json() as SuggestionsResponse & { intent?: string; slugLabel?: string };
+      setSuggestionsError(null);
       setSuggestions({
         ...data.suggestions,
         topQueries: data.topQueries,
         intent: data.intent,
         slugLabel: data.slugLabel,
         audience: data.audience,
+        performanceConclusions: data.performanceConclusions ?? [],
         contentHighlights: data.contentHighlights ?? [],
         contentGaps: data.contentGaps ?? [],
+        agent: data.agent,
       });
       setShowSuggestions(true);
     } catch {
-      // ignore
+      setSuggestionsError("Kunne ikke hente konkrete forslag akkurat nå. Prøv igjen.");
+      setShowSuggestions(false);
+      setSuggestions(null);
     }
     setLoadingSuggestions(false);
   }
@@ -86,7 +133,12 @@ function OpportunityCard({
     setStatusLoading(false);
   }
 
-  const isHighImpression = opp.type === "high-impressions-low-ctr" || opp.type === "near-page-one";
+  const hasConcreteSuggestions =
+    opp.type === "high-impressions-low-ctr" ||
+    opp.type === "near-page-one" ||
+    opp.type === "high-traffic-low-conversion" ||
+    opp.type === "query-gap" ||
+    opp.type === "traffic-down";
 
   return (
     <div className="opportunity-card" style={{ opacity: statusLoading ? 0.5 : 1 }}>
@@ -100,7 +152,7 @@ function OpportunityCard({
         <h3 className="card-title" style={{ margin: 0 }}>{opp.title}</h3>
       </div>
       <p className="card-url" style={{ fontSize: "0.85rem", opacity: 0.7, margin: "0.25rem 0 0.75rem" }}>
-        <a href={opp.pageUrl} target="_blank" rel="noopener noreferrer">{opp.pageUrl}</a>
+        <a href={resolvedUrl.href} target="_blank" rel="noopener noreferrer">{resolvedUrl.label}</a>
       </p>
 
       {opp.query && (
@@ -120,7 +172,7 @@ function OpportunityCard({
         </div>
       </div>
 
-      {isHighImpression && (
+      {hasConcreteSuggestions && (
         <div style={{ marginBottom: "0.75rem" }}>
           <button
             onClick={loadSuggestions}
@@ -131,8 +183,14 @@ function OpportunityCard({
               borderRadius: "6px", opacity: loadingSuggestions ? 0.5 : 1,
             }}
           >
-            {loadingSuggestions ? "Henter…" : showSuggestions ? "Skjul forslag" : "Vis title/meta-forslag"}
+            {loadingSuggestions ? "Henter…" : showSuggestions ? "Skjul konkrete forslag" : "Vis konkrete forslag"}
           </button>
+
+          {suggestionsError && (
+            <p style={{ margin: "0.5rem 0 0", fontSize: "0.8rem", color: "#b91c1c" }}>
+              {suggestionsError}
+            </p>
+          )}
 
           {showSuggestions && suggestions && (
             <div style={{ marginTop: "0.75rem", background: "rgba(0,0,0,0.04)", borderRadius: "8px", padding: "1rem" }}>
@@ -152,34 +210,73 @@ function OpportunityCard({
                   </ul>
                 </div>
               )}
-              {(suggestions.audience || suggestions.contentHighlights?.length || suggestions.contentGaps?.length) && (
+              {(suggestions.audience || suggestions.contentGaps?.length) && (
                 <div style={{ marginBottom: "0.75rem" }}>
-                  <strong style={{ fontSize: "0.8rem" }}>Hvorfor disse forslagene passer bedre</strong>
+                  <strong style={{ fontSize: "0.8rem" }}>Konkrete grep for denne siden</strong>
                   <ul style={{ margin: "0.25rem 0 0", paddingLeft: "1.25rem", fontSize: "0.8rem" }}>
                     {suggestions.audience ? <li>Målgruppe: {suggestions.audience}</li> : null}
-                    {suggestions.contentHighlights?.length ? <li>Siden ser ut til å handle om: {suggestions.contentHighlights.join(", ")}</li> : null}
                     {suggestions.contentGaps?.map((item) => <li key={item}>{item}</li>)}
                   </ul>
                 </div>
               )}
-              <div style={{ marginBottom: "0.75rem" }}>
-                <strong style={{ fontSize: "0.8rem" }}>Forslag til title tag</strong>
-                {suggestions.titles.map((t, i) => (
-                  <div key={i} style={{ marginTop: "0.35rem", background: "#fff", borderRadius: "4px", padding: "0.4rem 0.6rem", fontSize: "0.85rem", display: "flex", justifyContent: "space-between", alignItems: "center", gap: "0.5rem" }}>
-                    <span>{t}</span>
-                    <button onClick={() => navigator.clipboard.writeText(t)} style={{ fontSize: "0.7rem", padding: "0.15rem 0.5rem", background: "transparent", border: "1px solid #ccc", borderRadius: "4px", cursor: "pointer", flexShrink: 0 }}>Kopier</button>
-                  </div>
-                ))}
-              </div>
-              <div>
-                <strong style={{ fontSize: "0.8rem" }}>Forslag til meta description</strong>
-                {suggestions.metaDescriptions.map((m, i) => (
-                  <div key={i} style={{ marginTop: "0.35rem", background: "#fff", borderRadius: "4px", padding: "0.4rem 0.6rem", fontSize: "0.85rem", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.5rem" }}>
-                    <span>{m}</span>
-                    <button onClick={() => navigator.clipboard.writeText(m)} style={{ fontSize: "0.7rem", padding: "0.15rem 0.5rem", background: "transparent", border: "1px solid #ccc", borderRadius: "4px", cursor: "pointer", flexShrink: 0 }}>Kopier</button>
-                  </div>
-                ))}
-              </div>
+              {suggestions.performanceConclusions?.length ? (
+                <div style={{ marginBottom: "0.75rem" }}>
+                  <strong style={{ fontSize: "0.8rem" }}>Det systemet reagerte på</strong>
+                  <ul style={{ margin: "0.25rem 0 0", paddingLeft: "1.25rem", fontSize: "0.8rem" }}>
+                    {suggestions.performanceConclusions.map((item) => <li key={item}>{item}</li>)}
+                  </ul>
+                </div>
+              ) : null}
+              {suggestions.agent && (
+                <p style={{ fontSize: "0.78rem", marginBottom: "0.75rem", opacity: 0.7 }}>
+                  Generert av <strong>{suggestions.agent.name}</strong>
+                  {suggestions.agent.mode === "openai"
+                    ? suggestions.agent.model
+                      ? ` via AI-modellen ${suggestions.agent.model}`
+                      : " via AI"
+                    : " med lokal fallback"}
+                </p>
+              )}
+              {suggestions.titles.length > 0 && (
+                <div style={{ marginBottom: "0.75rem" }}>
+                  <strong style={{ fontSize: "0.8rem" }}>Forslag til title tag fra Aidar</strong>
+                  {(suggestions.titleOptions?.length ? suggestions.titleOptions : suggestions.titles.map((text) => ({ text, score: 0, reasons: [] }))).map((option, i) => (
+                    <div key={i} style={{ marginTop: "0.35rem", background: "#fff", borderRadius: "4px", padding: "0.4rem 0.6rem", fontSize: "0.85rem", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.5rem" }}>
+                      <div style={{ minWidth: 0 }}>
+                        <span>{option.text}</span>
+                        {(option.score > 0 || option.reasons.length > 0) && (
+                          <div style={{ marginTop: "0.2rem", fontSize: "0.74rem", opacity: 0.7 }}>
+                            {option.score > 0 ? `Kvalitetsscore: ${option.score}` : null}
+                            {option.score > 0 && option.reasons.length > 0 ? " · " : null}
+                            {option.reasons.length > 0 ? option.reasons.join(" · ") : null}
+                          </div>
+                        )}
+                      </div>
+                      <button onClick={() => navigator.clipboard.writeText(option.text)} style={{ fontSize: "0.7rem", padding: "0.15rem 0.5rem", background: "transparent", border: "1px solid #ccc", borderRadius: "4px", cursor: "pointer", flexShrink: 0 }}>Kopier</button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {suggestions.metaDescriptions.length > 0 && (
+                <div>
+                  <strong style={{ fontSize: "0.8rem" }}>Forslag til meta description fra Aidar</strong>
+                  {(suggestions.metaDescriptionOptions?.length ? suggestions.metaDescriptionOptions : suggestions.metaDescriptions.map((text) => ({ text, score: 0, reasons: [] }))).map((option, i) => (
+                    <div key={i} style={{ marginTop: "0.35rem", background: "#fff", borderRadius: "4px", padding: "0.4rem 0.6rem", fontSize: "0.85rem", display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "0.5rem" }}>
+                      <div style={{ minWidth: 0 }}>
+                        <span>{option.text}</span>
+                        {(option.score > 0 || option.reasons.length > 0) && (
+                          <div style={{ marginTop: "0.2rem", fontSize: "0.74rem", opacity: 0.7 }}>
+                            {option.score > 0 ? `Kvalitetsscore: ${option.score}` : null}
+                            {option.score > 0 && option.reasons.length > 0 ? " · " : null}
+                            {option.reasons.length > 0 ? option.reasons.join(" · ") : null}
+                          </div>
+                        )}
+                      </div>
+                      <button onClick={() => navigator.clipboard.writeText(option.text)} style={{ fontSize: "0.7rem", padding: "0.15rem 0.5rem", background: "transparent", border: "1px solid #ccc", borderRadius: "4px", cursor: "pointer", flexShrink: 0 }}>Kopier</button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -219,8 +316,9 @@ function exportTodo(opportunities: Opportunity[], domain: string): void {
     lines.push(`## ${TYPE_LABELS[type] ?? type}`);
     lines.push("");
     for (const opp of items) {
+      const resolvedUrl = resolveOpportunityUrl(domain || opp.domain, opp.pageUrl);
       lines.push(`- [ ] **${opp.title}**`);
-      lines.push(`  - Side: ${opp.pageUrl}`);
+      lines.push(`  - Side: ${resolvedUrl.label}`);
       lines.push(`  - Tiltak: ${opp.recommendedAction}`);
       lines.push(`  - Effekt: ${opp.expectedImpact}`);
       if (opp.query) lines.push(`  - Søk: ${opp.query}`);
@@ -241,10 +339,12 @@ export function OpportunitiesClient({
   initialOpportunities,
   domains,
   initialDomainFilter = "",
+  snapshots,
 }: {
   initialOpportunities: Opportunity[];
   domains: DomainIntegration[];
   initialDomainFilter?: string;
+  snapshots: OpportunitySnapshot[];
 }) {
   const [opportunities, setOpportunities] = useState(initialOpportunities);
   const [domainFilter, setDomainFilter] = useState(initialDomainFilter);
@@ -369,24 +469,62 @@ export function OpportunitiesClient({
           </p>
         </div>
       ) : (
-        <div className="opportunity-list">
-          {Object.entries(byType).map(([type, items]) => (
-            <section key={type} className="opportunity-group" style={{ marginBottom: "2rem" }}>
-              <h2 style={{ marginBottom: "1rem" }}>
-                {TYPE_LABELS[type] ?? type}{" "}
-                <span style={{ fontSize: "0.9rem", fontWeight: 400, opacity: 0.6 }}>({items.length})</span>
-              </h2>
-              {items.map((opp) => (
-                <OpportunityCard
-                  key={opp.id}
-                  opp={opp}
-                  domain={domainFilter || opp.domain}
-                  onStatusChange={handleStatusChange}
-                />
-              ))}
+        <>
+          <div className="opportunity-list">
+            {Object.entries(byType).map(([type, items]) => (
+              <section key={type} className="opportunity-group" style={{ marginBottom: "2rem" }}>
+                <h2 style={{ marginBottom: "1rem" }}>
+                  {TYPE_LABELS[type] ?? type}{" "}
+                  <span style={{ fontSize: "0.9rem", fontWeight: 400, opacity: 0.6 }}>({items.length})</span>
+                </h2>
+                {items.map((opp) => (
+                  <OpportunityCard
+                    key={opp.id}
+                    opp={opp}
+                    domain={domainFilter || opp.domain}
+                    onStatusChange={handleStatusChange}
+                  />
+                ))}
+              </section>
+            ))}
+          </div>
+
+          {snapshots.length > 0 ? (
+            <section className="history-panel" style={{ marginTop: "2rem" }}>
+              <div className="section-header">
+                <h2>Opportunity-historikk</h2>
+                <p>Feeden over viser bare nyeste snapshot per domene. Her ser du tidligere kjøringer separat.</p>
+              </div>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Domene</th>
+                      <th>Kjørt</th>
+                      <th>Muligheter</th>
+                      <th>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {snapshots.map((snapshot, index) => {
+                      const isLatestForDomain =
+                        snapshots.find((item) => item.domain === snapshot.domain)?.id === snapshot.id;
+
+                      return (
+                        <tr key={`${snapshot.domain}-${snapshot.id}-${index}`}>
+                          <td>{snapshot.domain}</td>
+                          <td>{new Date(snapshot.generatedAt).toLocaleString("nb-NO")}</td>
+                          <td>{snapshot.opportunityCount}</td>
+                          <td>{isLatestForDomain ? "Aktiv i feed" : "Historisk snapshot"}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </section>
-          ))}
-        </div>
+          ) : null}
+        </>
       )}
     </div>
   );

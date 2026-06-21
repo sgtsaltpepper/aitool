@@ -121,6 +121,9 @@ function buildSuggestionsMarkdown(report: NonNullable<ReturnType<typeof getAudit
     lines.push(`- Foreslått metatittel: ${suggestion.proposed.metaTitle}`);
     lines.push(`- Nåværende metabeskrivelse: ${suggestion.current.metaDescription || "Ingen"}`);
     lines.push(`- Foreslått metabeskrivelse: ${suggestion.proposed.metaDescription}`);
+    if (suggestion.metadataAgent) {
+      lines.push(`- Metadata-agent: ${suggestion.metadataAgent.name}${suggestion.metadataAgent.mode === "openai" ? suggestion.metadataAgent.model ? ` via ${suggestion.metadataAgent.model}` : " via AI" : " med lokal fallback"}`);
+    }
     lines.push("");
 
     if (suggestion.searchInsights) {
@@ -239,6 +242,9 @@ function buildPageAuditMarkdown(report: NonNullable<ReturnType<typeof getAuditRe
   lines.push(`- Foreslått metatittel: ${pageReport.proposed.metaTitle}`);
   lines.push(`- Nåværende metabeskrivelse: ${pageReport.current.metaDescription || "Ingen"}`);
   lines.push(`- Foreslått metabeskrivelse: ${pageReport.proposed.metaDescription}`);
+  if (pageReport.metadataAgent) {
+    lines.push(`- Metadata-agent: ${pageReport.metadataAgent.name}${pageReport.metadataAgent.mode === "openai" ? pageReport.metadataAgent.model ? ` via ${pageReport.metadataAgent.model}` : " via AI" : " med lokal fallback"}`);
+  }
   lines.push("");
   if (pageReport.searchInsights) {
     lines.push("## Søkeinnsikt bak metadataforslaget");
